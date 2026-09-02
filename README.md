@@ -178,11 +178,30 @@ Rollback: `GLM53_NVFP4_KV=0` in `.env` + restart.
 | `SM120 sparse MLA ... expects [num_pages,1,page_size,656]` | NVFP4 scratch shape | already fixed in `glm53_nvfp4_runtime.py` (page-shaped scratch) |
 | `Decode (num_tokens <= 64) must go through ...decode_dsv3_2` | scratch page geometry routed decode to the paged kernel | same fix as above |
 
-## 8. Benchmarks
+## 8. Benchmarks (llama-benchy, this exact configuration)
 
-See [`bench/llama-benchy.md`](bench/llama-benchy.md) (generated with
-[`llama-benchy`](https://pypi.org/project/llama-benchy/) against this exact
-configuration) plus our own numbers in the tables above.
+Single stream ([`bench/benchy-c1.md`](bench/benchy-c1.md)): prefill is a flat
+**~680-705 tok/s** from 2K to 32K prompts at any depth up to 32K; decode is
+**20-24 tok/s** (peak 27-29) and does not degrade with depth.
+
+| test | prefill t/s | decode t/s (tg128) |
+|---|---|---|
+| pp2048 | 676 | 22.7 |
+| pp8192 | 681 | 21.6 |
+| pp32768 | 706 | 22.8 |
+| pp32768 @ depth 32768 | 700 | 23.2 |
+
+Concurrency ([`bench/benchy-concurrency.md`](bench/benchy-concurrency.md)),
+with the honest caveat: when N long prompts arrive TOGETHER, the interleave
+policy serializes their prefills (total prefill stays ~585 tok/s = near solo
+speed) while active decoders run in waves (~50% duty, bursts to 48-55 tok/s
+total). Expect large TTFT spread under simultaneous long-context arrivals
+(c16: 122 s ± 66 s for 8K prompts). Once the prefill backlog clears, steady
+mixed-load decode measured **67.6 tok/s aggregate** (GSM8K, 12-way). This is
+the fundamental trade of one TP group sharing every GPU cycle: the
+alternatives are prefill starvation (kit default `skip`) or uniformly ~5-10
+tok/s decode (full mixing; the sparse-MLA indexer per-step cost dominates).
+Tune the wave cadence with `GLM53_MIXED_INTERLEAVE_PERIOD`/`_WINDOW`.
 
 ## Credits
 
