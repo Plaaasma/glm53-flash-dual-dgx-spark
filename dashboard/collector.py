@@ -10,7 +10,7 @@ hardware), and stores everything in SQLite. Serves:
 
 CORS is open — consumed directly by the dashboard page in the browser.
 """
-import json, sqlite3, threading, time, urllib.request
+import json, os, sqlite3, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -102,6 +102,71 @@ def pctile(now_b, old_b, q):
             hi = k if k != float("inf") else (lo * 2 or 1.0)
             return lo + ((target - prev) / span if span > 0 else 0.0) * (hi - lo)
     return ks[-1] if ks else None
+
+
+# ---------------- boot progress (EXL3 kit) ----------------
+BOOT_LOG = "/home/liam/glm53/exl3-kit/logs/head.log"
+# (stage-regex, label, pct at stage START, pct at stage END)
+import re as _re
+import subprocess as _sp
+_BOOT_STAGES = [
+    (_re.compile(r"Loading safetensors checkpoint shards:\s+(\d+)% .*?(\d+)/(\d+)"),
+     "loading weights", 5.0, 62.0),
+    (_re.compile(r"Building EXL3|exl3.*build|pointer tables"), "building EXL3 experts", 62.0, 68.0),
+    (_re.compile(r"Profiling CUDA graph"), "profiling CUDA graphs", 68.0, 76.0),
+    (_re.compile(r"Capturing CUDA graphs|Capturing dflash2"), "capturing CUDA graphs", 76.0, 86.0),
+    (_re.compile(r"init engine .* took"), "engine warmup", 86.0, 93.0),
+    (_re.compile(r"Multi-modal warmup|chat template|Supported tasks"), "starting API server", 93.0, 99.0),
+]
+_TOTAL_BOOT_EST = 540.0   # seconds, typical full boot on this cluster
+
+def _container_state():
+    try:
+        out = _sp.run(["docker", "inspect", "-f", "{{.State.Status}} {{.State.StartedAt}}",
+                       "glm53-exl3-head"], capture_output=True, text=True, timeout=3)
+        if out.returncode != 0:
+            return None, None
+        st, started = out.stdout.split()
+        import datetime
+        ts = datetime.datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp()
+        return st, ts
+    except Exception:
+        return None, None
+
+def boot_progress():
+    """Returns None when serving/idle, else {stage, pct, eta_s, elapsed_s}."""
+    st, started = _container_state()
+    if st is None:
+        return {"stage": "server stopped", "pct": 0.0, "eta_s": None, "elapsed_s": None}
+    if st != "running":
+        return {"stage": f"container {st}", "pct": 0.0, "eta_s": None, "elapsed_s": None}
+    elapsed = max(0.0, time.time() - (started or time.time()))
+    stage, pct = "container starting", 2.0
+    try:
+        with open(BOOT_LOG, "rb") as f:
+            f.seek(max(0, f.seek(0, 2) - 262144))
+            tail = f.read().decode(errors="replace")
+        if os.path.getmtime(BOOT_LOG) < (started or 0):
+            tail = ""             # stale log from a previous boot
+        for line in tail.splitlines():
+            for rx, label, p0, p1 in _BOOT_STAGES:
+                m = rx.search(line)
+                if m:
+                    stage, pct = label, p1
+                    if label == "loading weights" and m.lastindex and m.lastindex >= 3:
+                        frac = int(m.group(2)) / max(1, int(m.group(3)))
+                        pct = p0 + frac * (p1 - p0)
+                        stage = f"loading weights ({m.group(2)}/{m.group(3)} shards)"
+    except Exception:
+        pass
+    # ETA: blend the fixed budget with observed pace once we have signal.
+    if pct > 4 and elapsed > 20:
+        total = max(_TOTAL_BOOT_EST, elapsed / (pct / 100.0) * 0.9)
+    else:
+        total = _TOTAL_BOOT_EST
+    eta = max(0.0, total - elapsed)
+    return {"stage": stage, "pct": round(min(pct, 99.0), 1),
+            "eta_s": round(eta), "elapsed_s": round(elapsed)}
 
 # ---------------- collector loop ----------------
 # prev_vllm/ring_vllm and prev_sglang/ring_sglang are kept SEPARATE (not shared)
@@ -311,7 +376,8 @@ def tick():
             row[f"{key}_power"] = d["gpu"]["power"]; row[f"{key}_mem"] = d["mem"]["used_gib"]
             row[f"{key}_cpu"] = d["cpu_pct"]; row[f"{key}_net"] = net_rate(key, d)
     state["live"] = {"ts": now, "engine_up": engine_up, "model": state["model"],
-                     "engine": state["engine"], "row": row, "nodes": nodes}
+                     "engine": state["engine"], "row": row, "nodes": nodes,
+                     "boot": None if engine_up else boot_progress()}
     return now, row
 
 def loop():

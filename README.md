@@ -73,11 +73,23 @@ This clones the MiaAI-Lab kit at the tested commit and applies
 - **NVFP4 KV wiring** — ships `nvfp4-kv/patch_nvfp4_kv.py` +
   `glm53_nvfp4_runtime.py` into both containers at boot (same mount-and-patch
   mechanism the kit itself uses).
-- **`interleave` mixed-prefill policy** — the kit's default (`skip`) starves
-  every new prompt's prefill while any decode runs (minutes of dead TTFT,
-  client retry storms). `interleave` admits one prefill chunk in a 0.3 s
-  window every 3.5 s: decode keeps ~90 % of its throughput during overlap,
-  prefill flows at ~500 tok/s instead of zero.
+- **Mixed-prefill policy `GLM53_MIXED_PREFILL_CHUNK=128`** — the kit's
+  default (`skip`) starves every new prompt's prefill while any decode runs
+  (minutes of dead TTFT, client retry storms). Our first fix (`interleave`)
+  ended starvation but delivered decode in waves. The shipped setting caps
+  mixed prefill at 128 tokens/step, which on this stack (flat ~700 tok/s
+  prefill at any depth — the kit's old per-step-cost measurement no longer
+  applies) bounds every engine step, measured with a streaming client while
+  a 35K prefill lands concurrently:
+
+  | policy | median gap | p95 | p99 | max |
+  |---|---|---|---|---|
+  | interleave (waves) | 179 ms | 3122 ms | 3272 ms | 3312 ms |
+  | cap 256 | 550 ms | 721 ms | 1294 ms | 1345 ms |
+  | **cap 128 (shipped)** | **426 ms** | **502 ms** | **936 ms** | **1245 ms** |
+
+  A continuous stream at any concurrency, at the cost of prefill running
+  ~350 tok/s during overlap (solo prefill unaffected).
 - **Extended CUDA-graph capture sizes** so full-batch decode steps at 16
   concurrency stay inside graphs.
 
