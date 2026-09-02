@@ -191,8 +191,8 @@
   <div class="kpi saved"><div><span class="v num" id="k_saved">—</span></div>
     <div class="l">Saved vs
       <select id="apiSel" title="Compare against this hosted API's list price">
-        <option value="ds">DeepSeek V4 Flash</option>
-        <option value="glm">GLM 5.2</option>
+        <option value="glm53">GLM 5.3 Flash</option>
+        <option value="terra">GPT 5.6 Terra</option>
         <option value="opus">Claude Opus 4.8</option>
       </select>
     </div></div>
@@ -615,17 +615,19 @@ function setBar(k, id, v, max, label, warnAt){
   $(`${id}_${k}`).className = "bar" + (f > warnAt ? " warn" : "");
 }
 /* ---- lifetime totals & "saved vs hosted API" ------------------------------
-   Prices are USD per 1M tokens, list price as of 2026-08-04:
-     DeepSeek V4 Flash  $0.14 in / $0.28 out   (api-docs.deepseek.com pricing)
-     GLM 5.2            $0.60 in / $1.50 out   (OpenRouter listing)
-     Claude Opus 4.8    $5.00 in / $25.00 out
+   Prices are USD per 1M tokens, list price as of 2026-09-02:
+     GLM 5.3 Flash    $0.15 in / $0.50 out   (z.ai list; launch promo is
+                      $0.075/$0.25 until 2026-09-09 -- we compare vs list)
+     GPT 5.6 Terra    $2.00 in / $12.00 out  (openai.com; long-context reqs
+                      bill higher at $4/$18 -- base rate used here)
+     Claude Opus 4.8  $5.00 in / $25.00 out  (docs.claude.com)
    Totals come from /totals, which integrates the per-tick rates over the whole
    history — vLLM's raw counters reset on every engine restart, so they cannot
    simply be read off the latest sample. */
 const PRICES = {
-  ds:   {label:"DeepSeek V4 Flash", in:0.14, out:0.28},
-  glm:  {label:"GLM 5.2",           in:0.60, out:1.50},
-  opus: {label:"Claude Opus 4.8",   in:5.00, out:25.00},
+  glm53: {label:"GLM 5.3 Flash",   in:0.15, out:0.50},
+  terra: {label:"GPT 5.6 Terra",   in:2.00, out:12.00},
+  opus:  {label:"Claude Opus 4.8", in:5.00, out:25.00},
 };
 let totals = null;
 const fmtTok = v => v==null ? "—"
@@ -635,7 +637,7 @@ function renderTotals(){
   if (!totals){ return; }
   $("k_tin").textContent  = fmtTok(totals.input_tokens);
   $("k_tout").textContent = fmtTok(totals.output_tokens);
-  const p = PRICES[$("apiSel").value] || PRICES.ds;
+  const p = PRICES[$("apiSel").value] || PRICES.glm53;
   const usd = totals.input_tokens/1e6*p.in + totals.output_tokens/1e6*p.out;
   $("k_saved").textContent = usd >= 1000 ? "$"+(usd/1000).toFixed(1)+"k"
                            : usd >= 10   ? "$"+usd.toFixed(0)
