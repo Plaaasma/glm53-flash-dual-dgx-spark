@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spark Cluster — DSpark</title>
+<style>
+  :root{
+    --bg:#0a0e17; --panel:#101624; --panel2:#141b2d; --edge:#1d2740;
+    --txt:#dde4f2; --dim:#7c88a3; --faint:#3d4a68;
+    --cyan:#38cfff; --violet:#a78bfa; --green:#34d399; --amber:#fbbf24;
+    --rose:#fb7185; --blue:#60a5fa; --teal:#2dd4bf;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:13px/1.45 system-ui,-apple-system,sans-serif;padding:14px 16px 24px}
+  .num{font-variant-numeric:tabular-nums}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+  header h1{font-size:19px;font-weight:650}
+  header h1 b{color:var(--cyan)}
+  #model{color:var(--dim);font-size:12px}
+  #status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-left:auto}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--faint)}
+  .dot.ok{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.bad{background:var(--rose);box-shadow:0 0 8px var(--rose)}
+
+  .tf{display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .tf button{background:var(--panel);border:1px solid var(--edge);color:var(--dim);border-radius:7px;
+    padding:4px 11px;font:600 12px system-ui;cursor:pointer}
+  .tf button:hover{color:var(--txt);border-color:var(--faint)}
+  .tf button.on{background:var(--panel2);color:var(--cyan);border-color:var(--cyan)}
+  .tf #live{margin-left:8px}
+  .tf #live.on{color:var(--green);border-color:var(--green)}
+  .tf .hint{color:var(--faint);font-size:11px;margin-left:10px}
+
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:linear-gradient(160deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:10px;padding:10px 12px 8px}
+  .kpi .v{font-size:21px;font-weight:650}
+  .kpi .u{font-size:11px;color:var(--dim);font-weight:400}
+  .kpi .l{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;margin-top:2px}
+  .kpi.hero .v{color:var(--cyan)}
+  .kpi.saved .v{color:#34d399}
+  .kpi.saved select{background:transparent;color:var(--dim);border:1px solid var(--edge);
+    border-radius:5px;font:inherit;font-size:10px;text-transform:none;letter-spacing:0;
+    padding:1px 3px;margin-left:2px;cursor:pointer}
+  .kpi.saved select option{background:var(--panel);color:var(--fg)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:10px 12px 6px;min-width:0}
+  .card h3{font-size:11.5px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.9px;margin-bottom:4px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .card h3 .leg{display:flex;gap:10px;margin-left:auto;font-size:10.5px;text-transform:none;letter-spacing:0;font-weight:500}
+  .leg i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+  canvas.ch{width:100%;height:170px;display:block;touch-action:none;cursor:crosshair}
+  #tip{position:fixed;pointer-events:none;background:#0d1322ee;border:1px solid var(--edge);border-radius:8px;
+    padding:7px 10px;font-size:11.5px;display:none;z-index:10;box-shadow:0 6px 24px #0009;min-width:130px}
+  #tip .tt{color:var(--dim);margin-bottom:4px}
+  #tip .row{display:flex;justify-content:space-between;gap:14px}
+  #tip .row b{font-weight:600}
+
+  .nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:12px;margin-top:12px}
+  .node{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:12px 14px;display:grid;grid-template-columns:130px 1fr;gap:8px 18px;align-items:center}
+  .node .name{grid-column:1/3;display:flex;align-items:baseline;gap:10px}
+  .node .name b{font-size:15px}
+  .node .name span{color:var(--dim);font-size:11px}
+  .gaugewrap{text-align:center}
+  .gauge{width:118px;height:74px}
+  .gaugewrap .gl{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .chip{background:var(--panel2);border:1px solid var(--edge);border-radius:6px;padding:3px 9px;font-size:11.5px;color:var(--dim)}
+  .chip b{color:var(--txt);font-weight:600}
+  .bar{margin:5px 0}
+  .bar .bl{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:3px}
+  .bar .tr{height:7px;background:var(--panel2);border-radius:4px;overflow:hidden}
+  .bar .fl{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .6s}
+  .bar.warn .fl{background:linear-gradient(90deg,var(--amber),var(--rose))}
+  footer{margin-top:14px;color:var(--faint);font-size:11px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ <b>Spark Cluster</b> · DeepSeek-V4-DSpark</h1>
+  <span id="model" class="num"></span>
+  <span id="status"><span class="dot" id="edot"></span><span id="etxt">connecting…</span></span>
+</header>
+
+<div class="tf" id="tfbar">
+  <span class="hint" style="margin:0 6px 0 0">window</span>
+  <button data-s="300">5m</button><button data-s="900" class="on">15m</button><button data-s="1800">30m</button>
+  <button data-s="3600">1h</button><button data-s="14400">4h</button><button data-s="28800">8h</button>
+  <button data-s="43200">12h</button><button data-s="86400">24h</button><button data-s="604800">1w</button>
+  <button data-s="2592000">1M</button>
+  <button id="live" class="on">● LIVE</button>
+  <span class="hint">drag to pan · wheel to zoom · drag/wheel on y-axis to scale · double-click to reset</span>
+</div>
+
+<div class="kpis">
+  <div class="kpi hero"><div><span class="v num" id="k_gen">—</span> <span class="u">tok/s</span></div><div class="l">Generation</div></div>
+  <div class="kpi"><div><span class="v num" id="k_pp">—</span> <span class="u">tok/s</span></div><div class="l">Prefill</div></div>
+  <div class="kpi"><div><span class="v num" id="k_acc">—</span></div><div class="l">Spec accept</div></div>
+  <div class="kpi"><div><span class="v num" id="k_tau">—</span> <span class="u">tok/step</span></div><div class="l">Accept length</div></div>
+  <div class="kpi"><div><span class="v num" id="k_kv">—</span></div><div class="l">KV cache</div></div>
+  <div class="kpi"><div><span class="v num" id="k_rw">—</span></div><div class="l">Run / wait</div></div>
+  <div class="kpi"><div><span class="v num" id="k_ttft">—</span></div><div class="l">TTFT p50 · p99</div></div>
+  <div class="kpi"><div><span class="v num" id="k_itl">—</span></div><div class="l">Inter-token p50 · p99</div></div>
+  <div class="kpi"><div><span class="v num" id="k_tin">—</span></div><div class="l">Total input tokens</div></div>
+  <div class="kpi"><div><span class="v num" id="k_tout">—</span></div><div class="l">Total output tokens</div></div>
+  <div class="kpi saved"><div><span class="v num" id="k_saved">—</span></div>
+    <div class="l">Saved vs
+      <select id="apiSel" title="Compare against this hosted API's list price">
+        <option value="ds">DeepSeek V4 Flash</option>
+        <option value="glm">GLM 5.2</option>
+        <option value="opus">Claude Opus 4.8</option>
+      </select>
+    </div></div>
+  <div class="kpi"><div><span class="v num" id="k_req">—</span></div><div class="l">Requests ok · preempt</div></div>
+  <div class="kpi"><div><span class="v num" id="k_steps">—</span></div><div class="l">Engine steps/s · tok/step</div></div>
+  <div class="kpi"><div><span class="v num" id="k_queue">—</span></div><div class="l">Queue p50 · p99</div></div>
+  <div class="kpi"><div><span class="v num" id="k_cached">—</span></div><div class="l">Prompt tokens cached</div></div>
+  <div class="kpi"><div><span class="v num" id="k_tflops">—</span> <span class="u">TF/s</span></div><div class="l">Est. compute per GPU</div></div>
+</div>
+
+<div class="grid" id="grid"></div>
+<div class="nodes" id="nodes"></div>
+<div id="tip"></div>
+<footer>spark cluster dashboard · server-side history (35 days) · collector :9102 · agents :9101</footer>
+
+<script>
+"use strict";
+/* Follow whatever host the page was loaded from, so the dashboard works over
+   localhost, the LAN address, or Tailscale without being rebuilt. The collector
+   binds 0.0.0.0 and sends open CORS headers, so any of them resolve. */
+const API = `${location.protocol}//${location.hostname}:9102`;
+const TICK = 2500;
+const NODES = [
+  {key:"h", name:"gx10-a400", ip:"100.127.140.96", tag:"API host", color:"#38cfff"},
+  {key:"w", name:"sparkypoo", ip:"100.89.194.31", tag:"worker", color:"#fb7185"},
+];
+const $ = id => document.getElementById(id);
+const fmtI = v => Math.abs(v) >= 10000 ? (v/1000).toFixed(1)+"k" : Math.abs(v) >= 100 ? Math.round(v).toString() : v.toFixed(1);
+const fmtP = v => Math.round(v)+"%";
+const fmtS = v => v >= 10 ? v.toFixed(0)+"s" : v >= 1 ? v.toFixed(2)+"s" : Math.round(v*1000)+"ms";
+const fmtT = v => Math.round(v)+"°";
+const fmtG = v => v.toFixed(1);
+
+/* ================= chart definitions ================= */
+const DEFS = [
+  {id:"gen", title:"Generation — tok/s", fmt:fmtI, minmax:true,
+   series:[{col:"gen", name:"generate", color:"#38cfff", fill:true, width:2}]},
+  {id:"pp", title:"Prefill — tok/s", fmt:fmtI, minmax:true,
+   series:[{col:"pp", name:"prefill", color:"#a78bfa", fill:true, width:2}]},
+  {id:"spec", title:"Speculative decoding", fmt:fmtI,
+   series:[{col:"draftrate", name:"drafted tok/s", color:"#3d4a68", dash:[4,3]},
+           {col:"accpct", name:"accept %", color:"#34d399", fill:true, width:2}]},
+  {id:"pos", title:"Draft acceptance by position (7-token draft)", bars:true},
+  {id:"lat", title:"Latency percentiles", fmt:fmtS,
+   series:[{col:"ttft99", name:"TTFT p99", color:"#60a5fa", dash:[4,3]},
+           {col:"ttft50", name:"TTFT p50", color:"#38cfff", width:2},
+           {col:"itl99", name:"ITL p99", color:"#2dd4bf", dash:[4,3]},
+           {col:"itl50", name:"ITL p50", color:"#34d399", width:2},
+           {col:"q99", name:"queue p99", color:"#f472b6", dash:[2,3]},
+           {col:"q50", name:"queue p50", color:"#fb7185"}]},
+  {id:"kv", title:"KV cache & prefix hits", fmt:fmtP, autoMax:100,
+   series:[{col:"kv", name:"kv used %", color:"#fbbf24", fill:true, width:2},
+           {col:"pfx", name:"prefix hit %", color:"#a78bfa"},
+           {col:"cachedpct", name:"prompt tok cached %", color:"#34d399", dash:[4,3]}]},
+  {id:"reqs", title:"Requests — running / waiting", fmt:fmtI,
+   series:[{col:"run", name:"running", color:"#38cfff", fill:true, width:2},
+           {col:"wait_cap", name:"wait: capacity", color:"#fbbf24"},
+           {col:"wait_def", name:"wait: deferred (interleave)", color:"#a78bfa"}]},
+  {id:"engine", title:"Engine — steps/s & tokens/step", fmt:fmtI,
+   series:[{col:"steps", name:"steps/s", color:"#38cfff", width:2},
+           {col:"stepsz", name:"tok/step", color:"#fbbf24", dash:[4,3]}]},
+  {id:"tflops", title:"Estimated TFLOPS per GPU", fmt:fmtI,
+   series:[{col:"tflops", name:"TF/s", color:"#34d399", fill:true, width:2}]},
+  {id:"gpu", title:"GPU utilization", fmt:fmtP, autoMax:100,
+   series:[{col:"h_gpu", name:"gx10-a400", color:"#38cfff", fill:true, width:2},
+           {col:"w_gpu", name:"sparkypoo", color:"#fb7185", fill:true, width:2}]},
+  {id:"temp", title:"GPU temperature — °C", fmt:fmtT, autoMax:100,
+   series:[{col:"h_temp", name:"head", color:"#38cfff", width:2},
+           {col:"w_temp", name:"worker", color:"#fb7185", width:2}]},
+  {id:"mem", title:"Unified memory used — GiB", fmt:fmtG, autoMax:121.6,
+   series:[{col:"h_mem", name:"head", color:"#38cfff", fill:true, width:2},
+           {col:"w_mem", name:"worker", color:"#fb7185", fill:true, width:2}]},
+  {id:"net", title:"Network MB/s", fmt:fmtI,
+   series:[{col:"h_net", name:"head", color:"#38cfff", fill:true, width:2},
+           {col:"w_net", name:"worker", color:"#fb7185", fill:true, width:2}]},
+];
+const POS_COLORS = ["#34d399","#2dd4bf","#38cfff","#60a5fa","#a78bfa","#f472b6","#fbbf24"];
+
+/* build cards */
+for (const d of DEFS){
+  const card = document.createElement("div"); card.className = "card";
+  const leg = d.series ? d.series.map(s=>`<span><i style="background:${s.color}"></i>${s.name}</span>`).join("") : "";
+  card.innerHTML = `<h3>${d.title} <span class="leg">${d.minmax?`<span id="mm_${d.id}" class="num" style="color:var(--dim)"></span>`:""}${leg}</span></h3><canvas class="ch" id="c_${d.id}"></canvas>`;
+  $("grid").appendChild(card);
+}
+
+/* ================= view state (shared time domain) ================= */
+const view = {span: 900e3, t1: Date.now(), live: true};
+let H = null;                      // current /history payload
+let liveRow = null;
+const PADL = 48, PADB = 18, PADT = 6, PADR = 8;
+const yState = {};                 // per chart: null=auto | {min,max}
+
+function setLive(on){
+  view.live = on;
+  $("live").className = on ? "on" : "";
+  if (on){ view.t1 = Date.now(); scheduleFetch(0); }
+}
+document.querySelectorAll("#tfbar button[data-s]").forEach(b=>{
+  b.onclick = () => {
+    document.querySelectorAll("#tfbar button[data-s]").forEach(x=>x.className="");
+    b.className = "on";
+    view.span = +b.dataset.s * 1000;
+    setLive(true);
+  };
+});
+$("live").onclick = () => setLive(true);
+
+/* ================= data fetch ================= */
+let fetchTimer = null, fetching = false, refetchQueued = false;
+function scheduleFetch(delay=140){
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(fetchHistory, delay);
+}
+async function fetchHistory(){
+  if (fetching){ refetchQueued = true; return; }
+  fetching = true;
+  try {
+    const t0 = view.t1 - view.span;
+    const r = await fetch(`${API}/history?from=${t0/1000}&to=${view.t1/1000}&points=520`, {cache:"no-store"});
+    H = await r.json();
+    drawAll();
+  } catch(e){}
+  fetching = false;
+  if (refetchQueued){ refetchQueued = false; scheduleFetch(0); }
+}
+
+/* ================= drawing ================= */
+const charts = {};
+function niceTimeTicks(t0, t1){
+  const span = t1 - t0;
+  const steps = [60,120,300,600,900,1800,3600,7200,14400,21600,43200,86400,172800,604800,1209600,2592000].map(s=>s*1000);
+  const step = steps.find(s => span/s <= 7) || steps[steps.length-1];
+  const out = [];
+  for (let t = Math.ceil(t0/step)*step; t <= t1; t += step) out.push(t);
+  return out;
+}
+function fmtTime(t, span){
+  const d = new Date(t);
+  if (span <= 86400e3) return d.toTimeString().slice(0,5);
+  if (span <= 7*86400e3) return d.toLocaleDateString(undefined,{weekday:"short"})+" "+d.toTimeString().slice(0,5);
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"});
+}
+function autoY(def){
+  if (!H) return [0,1];
+  let max = -Infinity, min = Infinity;
+  const t0 = view.t1 - view.span;
+  for (const s of def.series){
+    /* include the peak envelope so true maxima are not drawn off-chart */
+    const cols = [H[s.col], H[s.col+"_mx"]].filter(Boolean);
+    for (const col of cols) for (let i=0;i<H.t.length;i++){
+      const tm = H.t[i]*1000;
+      if (tm < t0 || tm > view.t1 || col[i] == null) continue;
+      if (col[i] > max) max = col[i];
+      if (col[i] < min) min = col[i];
+    }
+  }
+  if (max === -Infinity) return [0, def.autoMax || 1];
+  if (def.autoMax) return [0, Math.max(def.autoMax, max*1.05)];
+  return [0, max <= 0 ? 1 : max*1.15];
+}
+function drawChart(def){
+  const cv = $("c_"+def.id), ctx = cv.getContext("2d");
+  const dpr = devicePixelRatio||1, W = cv.clientWidth, Hh = cv.clientHeight;
+  if (!W) return;
+  if (cv.width !== W*dpr){ cv.width = W*dpr; cv.height = Hh*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,Hh);
+  const iw = W-PADL-PADR, ih = Hh-PADT-PADB;
+  const t0 = view.t1 - view.span;
+  const ys = yState[def.id];
+  const [y0, y1] = ys ? [ys.min, ys.max] : autoY(def);
+  const X = t => PADL + iw*(t-t0)/view.span;
+  const Y = v => PADT + ih*(1-(v-y0)/(y1-y0));
+  /* grid + y labels */
+  ctx.strokeStyle = "#1d2740"; ctx.fillStyle = "#5b6784"; ctx.font = "10px system-ui"; ctx.textAlign = "right";
+  for (let i=0;i<=3;i++){
+    const yy = PADT + ih*(1-i/3);
+    ctx.beginPath(); ctx.moveTo(PADL,yy); ctx.lineTo(W-PADR,yy); ctx.stroke();
+    ctx.fillText(def.fmt(y0+(y1-y0)*i/3), PADL-6, yy+3.5);
+  }
+  /* x ticks */
+  ctx.textAlign = "center";
+  for (const t of niceTimeTicks(t0, view.t1)){
+    const x = X(t);
+    ctx.strokeStyle = "#161d30"; ctx.beginPath(); ctx.moveTo(x,PADT); ctx.lineTo(x,PADT+ih); ctx.stroke();
+    ctx.fillText(fmtTime(t, view.span), x, Hh-4);
+  }
+  if (!H || !H.t.length) return;
+  const gapMs = (H.bucket_s || 2.5)*2500 + 5000;
+  for (const s of def.series){
+    const col = H[s.col]; if (!col) continue;
+    /* peak envelope: the line is a bucket AVERAGE, so at wide timeframes real
+       spikes vanish from it. Shade min..max of each bucket behind the line. */
+    const emx = H[s.col+"_mx"], emn = H[s.col+"_mn"];
+    if (emx && emn){
+      ctx.beginPath(); let started=false; const back=[];
+      for (let i=0;i<H.t.length;i++){
+        const tm = H.t[i]*1000; if (emx[i]==null) continue;
+        if (tm < t0-view.span || tm > view.t1+view.span) continue;
+        const x = X(tm), y = Y(Math.max(y0, Math.min(y1, emx[i])));
+        if (!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+        back.push([x, Y(Math.max(y0, Math.min(y1, emn[i]??0)))]);
+      }
+      if (started){
+        for (let i=back.length-1;i>=0;i--) ctx.lineTo(back[i][0], back[i][1]);
+        ctx.closePath(); ctx.fillStyle = s.color+"26"; ctx.fill();
+      }
+    }
+    /* fill */
+    if (s.fill){
+      ctx.beginPath(); let started=false, firstX=null, lastX=null, prevT=null;
+      for (let i=0;i<H.t.length;i++){
+        const tm = H.t[i]*1000; if (col[i]==null) continue;
+        const x = X(tm), y = Y(Math.max(y0, Math.min(y1, col[i])));
+        if (!started){ ctx.moveTo(x,y); firstX = x; started = true; }
+        else ctx.lineTo(x,y);
+        lastX = x; prevT = tm;
+      }
+      if (started && lastX > firstX){
+        ctx.lineTo(lastX, PADT+ih); ctx.lineTo(firstX, PADT+ih); ctx.closePath();
+        const gr = ctx.createLinearGradient(0,PADT,0,PADT+ih);
+        gr.addColorStop(0, s.color+"4d"); gr.addColorStop(1, s.color+"05");
+        ctx.fillStyle = gr; ctx.fill();
+      }
+    }
+    /* line with gap breaks */
+    ctx.beginPath(); let st=false, prevT=null, pts=0, lx=0, ly=0;
+    for (let i=0;i<H.t.length;i++){
+      const tm = H.t[i]*1000;
+      if (col[i]==null){ st=false; continue; }
+      if (prevT != null && tm - prevT > gapMs) st = false;
+      lx = X(tm); ly = Y(Math.max(y0, Math.min(y1, col[i]))); pts++;
+      if (!st){ ctx.moveTo(lx,ly); st=true; } else ctx.lineTo(lx,ly);
+      prevT = tm;
+    }
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width||1.6;
+    ctx.setLineDash(s.dash||[]); ctx.stroke(); ctx.setLineDash([]);
+    if (pts === 1){ ctx.fillStyle = s.color; ctx.beginPath(); ctx.arc(lx,ly,2.5,0,7); ctx.fill(); }
+  }
+  /* min/max readout */
+  if (def.minmax){
+    let mn=Infinity, mx=-Infinity;
+    const base = def.series[0].col;
+    /* Prefer true per-bucket extremes; the plotted line is a bucket AVERAGE, so
+       using it here made "max" shrink as the timeframe widened. */
+    const col = H[base]||[], colMx = H[base+"_mx"]||col, colMn = H[base+"_mn"]||col;
+    for (let i=0;i<H.t.length;i++){
+      const tm = H.t[i]*1000;
+      if (tm<t0||tm>view.t1) continue;
+      if (colMn[i]!=null && colMn[i]<mn) mn=colMn[i];
+      if (colMx[i]!=null && colMx[i]>mx) mx=colMx[i];
+    }
+    $("mm_"+def.id).textContent = mx>-Infinity ? `min ${def.fmt(mn)} · max ${def.fmt(mx)}` : "";
+  }
+  /* manual-scale marker */
+  if (ys){ ctx.fillStyle = "#fbbf24"; ctx.font = "9px system-ui"; ctx.textAlign="left"; ctx.fillText("y:manual", PADL+4, PADT+9); }
+}
+function drawBars(){
+  const cv = $("c_pos"), ctx = cv.getContext("2d");
+  const dpr = devicePixelRatio||1, W = cv.clientWidth, Hh = cv.clientHeight;
+  if (!W) return;
+  if (cv.width !== W*dpr){ cv.width = W*dpr; cv.height = Hh*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,Hh);
+  const vals = [0,1,2,3,4,5,6].map(i => liveRow ? liveRow["pos"+i] : null);
+  const n = 5, bw = Math.min(84,(W-60)/n-26), ih = Hh-36;
+  vals.forEach((v,i)=>{
+    const cx = 40 + (W-60)*(i+.5)/n, h = ih*Math.max(0,Math.min(1,v??0)), yy = 10+ih-h;
+    ctx.fillStyle = "#141b2d"; rr(ctx,cx-bw/2,10,bw,ih,5); ctx.fill();
+    if (v!=null && h>0){
+      const gr = ctx.createLinearGradient(0,yy,0,yy+h);
+      gr.addColorStop(0,POS_COLORS[i]); gr.addColorStop(1,POS_COLORS[i]+"33");
+      ctx.fillStyle = gr; rr(ctx,cx-bw/2,yy,bw,h,5); ctx.fill();
+    }
+    ctx.fillStyle = "#dde4f2"; ctx.font = "600 12px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(v==null?"—":Math.round(v*100)+"%", cx, yy-5<20?24:yy-5);
+    ctx.fillStyle = "#7c88a3"; ctx.font = "10px system-ui"; ctx.fillText("p"+i, cx, Hh-6);
+  });
+}
+function rr(ctx,x,y,w,h,r){ r=Math.max(0,Math.min(r,h/2,w/2)); ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function drawAll(){ for (const d of DEFS) d.bars ? drawBars() : drawChart(d); }
+
+/* ================= interactions ================= */
+for (const def of DEFS){
+  if (def.bars) continue;
+  const cv = $("c_"+def.id);
+  let drag = null;
+  cv.addEventListener("pointerdown", e=>{
+    cv.setPointerCapture(e.pointerId);
+    const onAxis = e.offsetX < PADL;
+    const ys0 = yState[def.id] || (()=>{ const [a,b]=autoY(def); return {min:a,max:b}; })();
+    drag = {x:e.clientX, y:e.clientY, t1:view.t1, onAxis, ys0:{...ys0}};
+    cv.style.cursor = onAxis ? "ns-resize" : "grabbing";
+  });
+  cv.addEventListener("pointermove", e=>{
+    if (drag){
+      if (drag.onAxis){
+        const f = Math.exp((e.clientY - drag.y) * 0.006);
+        const c = (drag.ys0.min + drag.ys0.max)/2, half = (drag.ys0.max - drag.ys0.min)/2*f;
+        yState[def.id] = {min: c-half, max: c+half};
+        drawChart(def);
+      } else {
+        const iw = cv.clientWidth - PADL - PADR;
+        const dt = (drag.x - e.clientX) / iw * view.span;
+        view.t1 = Math.min(Date.now(), drag.t1 + dt);
+        if (view.t1 < Date.now() - TICK*2) setLiveSilent(false);
+        drawAll(); scheduleFetch();
+      }
+      return;
+    }
+    crosshair(def, cv, e);
+  });
+  const end = e=>{ drag = null; cv.style.cursor = "crosshair"; };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  cv.addEventListener("mouseleave", ()=>{ $("tip").style.display = "none"; drawChart(def); });
+  cv.addEventListener("wheel", e=>{
+    e.preventDefault();
+    if (e.offsetX < PADL){                       /* y zoom */
+      const ys0 = yState[def.id] || (()=>{ const [a,b]=autoY(def); return {min:a,max:b}; })();
+      const f = Math.exp(e.deltaY * 0.0012);
+      const c = (ys0.min+ys0.max)/2, half = (ys0.max-ys0.min)/2*f;
+      yState[def.id] = {min: c-half, max: c+half};
+      drawChart(def);
+      return;
+    }
+    const iw = cv.clientWidth - PADL - PADR;     /* x zoom around cursor */
+    const frac = Math.max(0, Math.min(1, (e.offsetX-PADL)/iw));
+    const tCur = view.t1 - view.span + frac*view.span;
+    const f = Math.exp(e.deltaY * 0.0015);
+    view.span = Math.max(30e3, Math.min(45*86400e3, view.span*f));
+    view.t1 = Math.min(Date.now(), tCur + (1-frac)*view.span);
+    if (view.t1 < Date.now() - TICK*2) setLiveSilent(false);
+    drawAll(); scheduleFetch();
+  }, {passive:false});
+  cv.addEventListener("dblclick", e=>{
+    if (e.offsetX < PADL){ delete yState[def.id]; drawChart(def); return; }
+    delete yState[def.id]; setLive(true);
+  });
+}
+function setLiveSilent(on){ view.live = on; $("live").className = on ? "on" : ""; }
+
+function crosshair(def, cv, e){
+  if (!H || !H.t.length) return;
+  drawChart(def);
+  const ctx = cv.getContext("2d");
+  const iw = cv.clientWidth - PADL - PADR, ih = cv.clientHeight - PADT - PADB;
+  const t0 = view.t1 - view.span;
+  const tm = t0 + Math.max(0,Math.min(1,(e.offsetX-PADL)/iw)) * view.span;
+  /* nearest bucket */
+  let best = -1, bd = Infinity;
+  for (let i=0;i<H.t.length;i++){
+    const d = Math.abs(H.t[i]*1000 - tm);
+    if (d < bd){ bd = d; best = i; }
+  }
+  if (best < 0) return;
+  const bx = PADL + iw*(H.t[best]*1000 - t0)/view.span;
+  ctx.strokeStyle = "#3d4a68"; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(bx, PADT); ctx.lineTo(bx, PADT+ih); ctx.stroke(); ctx.setLineDash([]);
+  const rows = [];
+  for (const s of def.series){
+    const v = (H[s.col]||[])[best];
+    if (v == null) continue;
+    rows.push(`<div class="row"><span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color};margin-right:5px"></i>${s.name}</span><b class="num">${def.fmt(v)}</b></div>`);
+  }
+  const tip = $("tip");
+  if (!rows.length){ tip.style.display = "none"; return; }
+  tip.innerHTML = `<div class="tt">${new Date(H.t[best]*1000).toLocaleString()}</div>` + rows.join("");
+  tip.style.display = "block";
+  const tw = tip.offsetWidth;
+  tip.style.left = Math.min(innerWidth - tw - 12, e.clientX + 14) + "px";
+  tip.style.top = (e.clientY + 12) + "px";
+}
+
+/* ================= node cards + KPIs (live) ================= */
+for (const a of NODES){
+  const el = document.createElement("div"); el.className = "node";
+  el.innerHTML = `
+    <div class="name"><b>${a.name}</b><span>${a.ip} · ${a.tag}</span><span id="off_${a.key}" style="color:var(--rose)">waiting…</span></div>
+    <div class="gaugewrap"><canvas class="gauge" id="gg_${a.key}"></canvas><div class="gl">gpu</div></div>
+    <div>
+      <div class="chips">
+        <span class="chip">🌡 <b id="t_${a.key}">—</b>°C</span>
+        <span class="chip">⚡ <b id="p_${a.key}">—</b> W</span>
+        <span class="chip">⏱ <b id="c_${a.key}">—</b> MHz</span>
+        <span class="chip">load <b id="ld_${a.key}">—</b></span>
+      </div>
+      <div class="bar" id="bm_${a.key}"><div class="bl"><span>unified memory</span><span id="bmv_${a.key}">—</span></div><div class="tr"><div class="fl" id="bmf_${a.key}"></div></div></div>
+      <div class="bar" id="bc_${a.key}"><div class="bl"><span>cpu</span><span id="bcv_${a.key}">—</span></div><div class="tr"><div class="fl" id="bcf_${a.key}"></div></div></div>
+      <div class="bar" id="bd_${a.key}"><div class="bl"><span>disk</span><span id="bdv_${a.key}">—</span></div><div class="tr"><div class="fl" id="bdf_${a.key}"></div></div></div>
+    </div>`;
+  $("nodes").appendChild(el);
+}
+function gaugeDraw(cv, v, color){
+  const ctx = cv.getContext("2d"), dpr = devicePixelRatio||1;
+  const W = cv.clientWidth, Hh = cv.clientHeight;
+  if (!W) return;
+  if (cv.width !== W*dpr){ cv.width = W*dpr; cv.height = Hh*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,Hh);
+  const cx = W/2, cy = Hh-6, r = Math.min(W/2-8, Hh-14);
+  ctx.lineWidth = 9; ctx.lineCap = "round"; ctx.strokeStyle = "#1d2740";
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,2*Math.PI); ctx.stroke();
+  if (v != null){
+    ctx.strokeStyle = color;
+    ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI*(1+Math.min(v,100)/100)); ctx.stroke();
+  }
+  ctx.fillStyle = "#dde4f2"; ctx.font = "600 17px system-ui"; ctx.textAlign = "center";
+  ctx.fillText(v==null?"—":Math.round(v)+"%", cx, cy-6);
+}
+function setBar(k, id, v, max, label, warnAt){
+  const f = v/max;
+  $(`${id}v_${k}`).textContent = label;
+  $(`${id}f_${k}`).style.width = Math.min(100,100*f)+"%";
+  $(`${id}_${k}`).className = "bar" + (f > warnAt ? " warn" : "");
+}
+/* ---- lifetime totals & "saved vs hosted API" ------------------------------
+   Prices are USD per 1M tokens, list price as of 2026-08-04:
+     DeepSeek V4 Flash  $0.14 in / $0.28 out   (api-docs.deepseek.com pricing)
+     GLM 5.2            $0.60 in / $1.50 out   (OpenRouter listing)
+     Claude Opus 4.8    $5.00 in / $25.00 out
+   Totals come from /totals, which integrates the per-tick rates over the whole
+   history — vLLM's raw counters reset on every engine restart, so they cannot
+   simply be read off the latest sample. */
+const PRICES = {
+  ds:   {label:"DeepSeek V4 Flash", in:0.14, out:0.28},
+  glm:  {label:"GLM 5.2",           in:0.60, out:1.50},
+  opus: {label:"Claude Opus 4.8",   in:5.00, out:25.00},
+};
+let totals = null;
+const fmtTok = v => v==null ? "—"
+  : v>=1e9 ? (v/1e9).toFixed(2)+"B" : v>=1e6 ? (v/1e6).toFixed(1)+"M"
+  : v>=1e3 ? (v/1e3).toFixed(1)+"k" : Math.round(v).toLocaleString();
+function renderTotals(){
+  if (!totals){ return; }
+  $("k_tin").textContent  = fmtTok(totals.input_tokens);
+  $("k_tout").textContent = fmtTok(totals.output_tokens);
+  const p = PRICES[$("apiSel").value] || PRICES.ds;
+  const usd = totals.input_tokens/1e6*p.in + totals.output_tokens/1e6*p.out;
+  $("k_saved").textContent = usd >= 1000 ? "$"+(usd/1000).toFixed(1)+"k"
+                           : usd >= 10   ? "$"+usd.toFixed(0)
+                                         : "$"+usd.toFixed(2);
+  $("k_saved").parentElement.parentElement.title =
+    `${fmtTok(totals.input_tokens)} in + ${fmtTok(totals.output_tokens)} out at `
+    + `${p.label} list price ($${p.in}/$${p.out} per 1M) = $${usd.toFixed(2)}`;
+}
+async function pollTotals(){
+  try { totals = await (await fetch(API+"/totals", {cache:"no-store"})).json(); renderTotals(); }
+  catch(e){ /* collector down; leave last known values */ }
+}
+
+async function pollLive(){
+  let d;
+  try { d = await (await fetch(API+"/live", {cache:"no-store"})).json(); }
+  catch(e){ $("edot").className="dot bad"; $("etxt").textContent="collector unreachable"; return; }
+  liveRow = d.row || null;
+  $("edot").className = "dot " + (d.engine_up ? "ok" : "bad");
+  $("etxt").textContent = d.engine_up ? "engine live" : "engine down";
+  if (d.model) $("model").textContent = d.model;
+  const r = d.row || {};
+  const set = (id, v, f) => $(id).textContent = v==null ? "—" : f(v);
+  set("k_gen", r.gen, v=>v.toFixed(1));
+  set("k_pp", r.pp, v=>v<1?v.toFixed(1):Math.round(v).toString());
+  set("k_acc", r.accpct, v=>v.toFixed(1)+"%");
+  set("k_tau", r.tau, v=>v.toFixed(2));
+  set("k_kv", r.kv, v=>v.toFixed(1)+"%");
+  $("k_rw").textContent = `${r.run??"—"} / ${r.wait??"—"}`;
+  $("k_ttft").textContent = r.ttft50!=null ? fmtS(r.ttft50)+" · "+fmtS(r.ttft99) : "idle";
+  $("k_itl").textContent = r.itl50!=null ? fmtS(r.itl50)+" · "+fmtS(r.itl99) : "idle";
+  renderTotals();
+  $("k_req").textContent = `${r.req_ok??"—"} · ${r.preempt??"—"}`;
+  $("k_steps").textContent = r.steps!=null ? `${r.steps.toFixed(1)} · ${r.stepsz!=null?Math.round(r.stepsz):"—"}` : "—";
+  $("k_queue").textContent = r.q50!=null ? fmtS(r.q50)+" · "+fmtS(r.q99) : "idle";
+  set("k_cached", r.cachedpct, v=>v.toFixed(0)+"%");
+  set("k_tflops", r.tflops, v=>v.toFixed(1));
+  $("k_rw").title = `capacity-wait: ${r.wait_cap??0}  deferred (interleave): ${r.wait_def??0}`;
+  for (const a of NODES){
+    const nd = (d.nodes||{})[a.key];
+    $("off_"+a.key).textContent = nd ? "" : "agent offline";
+    gaugeDraw($("gg_"+a.key), nd?.gpu.util ?? null, a.color);
+    if (!nd) continue;
+    $("t_"+a.key).textContent = nd.gpu.temp ?? "—";
+    $("p_"+a.key).textContent = nd.gpu.power != null ? Math.round(nd.gpu.power) : "—";
+    $("c_"+a.key).textContent = nd.gpu.sm_mhz != null ? Math.round(nd.gpu.sm_mhz) : "—";
+    $("ld_"+a.key).textContent = nd.load1;
+    setBar(a.key,"bm", nd.mem.used_gib, nd.mem.total_gib, `${nd.mem.used_gib} / ${nd.mem.total_gib} GiB`, .93);
+    setBar(a.key,"bc", nd.cpu_pct, 100, nd.cpu_pct+"%", .9);
+    setBar(a.key,"bd", nd.disk.used_gib, nd.disk.total_gib, `${Math.round(nd.disk.used_gib)} / ${Math.round(nd.disk.total_gib)} GiB`, .9);
+  }
+  drawBars();
+}
+
+/* ================= boot + live loop ================= */
+drawAll();
+pollLive(); fetchHistory(); pollTotals();
+$("apiSel").addEventListener("change", renderTotals);
+setInterval(()=>{
+  pollLive();
+  if (view.live){ view.t1 = Date.now(); fetchHistory(); }
+}, TICK);
+/* /totals walks the full history table — refresh it far less often than the live poll */
+setInterval(pollTotals, 60000);
+addEventListener("resize", drawAll);
+</script>
+</body>
+</html>

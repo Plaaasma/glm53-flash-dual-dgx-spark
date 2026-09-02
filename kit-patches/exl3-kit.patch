@@ -1,0 +1,123 @@
+diff --git a/overlay/patch_scheduler_decode_floor.py b/overlay/patch_scheduler_decode_floor.py
+index 59c8409..879b65f 100644
+--- a/overlay/patch_scheduler_decode_floor.py
++++ b/overlay/patch_scheduler_decode_floor.py
+@@ -44,6 +44,30 @@ def _glm53_mixed_prefill_policy(running, current):
+     raw = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip").strip().lower()
+     if raw in ("0", "off", "no"):
+         return None
++    if raw == "interleave":
++        # Periodic admission: while a peer decodes, admit prefill chunks only
++        # inside a WINDOW every PERIOD seconds. Between windows: decode-only
++        # steps at full speed. During the admitted mixed step decode rides the
++        # slow (~1.5 s) sparse-MLA prefill step, so per period decode keeps
++        # roughly (PERIOD - 1.5)/PERIOD of solo throughput while prefill makes
++        # ~one chunk per period instead of starving outright (issue #6 default
++        # `skip` starves prefill for the whole peer decode -- observed as
++        # minutes-long TTFT and client retry storms, 2026-09-01).
++        # Solo prefill and solo decode are unchanged: no decoding peer -> None.
++        import time as _t
++        cur_id = getattr(current, "request_id", None)
++        decoding = False
++        for r in running:
++            if r is current or getattr(r, "request_id", None) == cur_id:
++                continue
++            if r.num_computed_tokens >= r.num_prompt_tokens:
++                decoding = True
++                break
++        if not decoding:
++            return None
++        period = float(os.environ.get("GLM53_MIXED_INTERLEAVE_PERIOD", "3.5"))
++        window = float(os.environ.get("GLM53_MIXED_INTERLEAVE_WINDOW", "0.3"))
++        return None if (_t.monotonic() % period) < window else 0
+     if raw in ("skip", "-1"):
+         cap = 0
+     else:
+diff --git a/start.sh b/start.sh
+index f3537c2..7a7b89a 100755
+--- a/start.sh
++++ b/start.sh
+@@ -174,6 +174,8 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
+ DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
+ APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
+ XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
++NVFP4_PATCH_HOST="${NVFP4_PATCH_HOST:-/home/liam/glm53/nvfp4-vllm/patch_nvfp4_kv.py}"
++NVFP4_RT_HOST="${NVFP4_RT_HOST:-/home/liam/glm53/nvfp4-vllm/glm53_nvfp4_runtime.py}"
+ KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
+ QUANTIZATION="${QUANTIZATION:-exl3}"
+@@ -194,9 +196,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
+         *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
+         *)
+             if [ "$SPEC_METHOD" = "dflash" ]; then
+-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32"
++                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32 64"
+             else
+-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 6 8 12"
++                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 6 8 12 24 48"
+             fi
+             ;;
+     esac
+@@ -227,6 +229,7 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
+ # Mixed-step prefill policy when a peer is already decoding (issue #6).
+ # skip = do not mix; N>0 = cap tokens; 0 = off.
+ GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
++GLM53_NVFP4_KV="${GLM53_NVFP4_KV:-0}"
+ # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
+ # exceed that without being a true hang. NCCL watchdog is still 600s.
+ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+@@ -899,6 +902,9 @@ fi
+ if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
+     python3 /opt/glm53/patch_xgrammar_termination.py
+ fi
++if [ -f /opt/glm53/patch_nvfp4_kv.py ]; then
++    python3 /opt/glm53/patch_nvfp4_kv.py
++fi
+ if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
+     python3 /opt/glm53/patch_kpool_tail_slotmap.py
+ fi
+@@ -989,6 +995,9 @@ fi
+ if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
+     python3 /opt/glm53/patch_xgrammar_termination.py
+ fi
++if [ -f /opt/glm53/patch_nvfp4_kv.py ]; then
++    python3 /opt/glm53/patch_nvfp4_kv.py
++fi
+ if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
+     python3 /opt/glm53/patch_kpool_tail_slotmap.py
+ fi
+@@ -1028,6 +1037,8 @@ launch_cluster() {
+     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
+     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
+     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
++    scp -q -o BatchMode=yes "$NVFP4_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_nvfp4_kv.py"
++    scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
+     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
+     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+ 
+@@ -1053,6 +1064,7 @@ launch_cluster() {
+         -e VLLM_CACHE_ROOT=/root/.cache/vllm
+         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
+         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
++        -e "GLM53_NVFP4_KV=$GLM53_NVFP4_KV"
+         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
+         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
+         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+@@ -1124,6 +1136,8 @@ launch_cluster() {
+         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
+         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
+         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
++        -v '/tmp/patch_nvfp4_kv.py:/opt/glm53/patch_nvfp4_kv.py:ro' \
++        -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
+         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
+         -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
+@@ -1155,6 +1169,8 @@ launch_cluster() {
+         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
+         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
+         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
++        -v "$NVFP4_PATCH_HOST:/opt/glm53/patch_nvfp4_kv.py:ro" \
++        -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
+         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
+         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
