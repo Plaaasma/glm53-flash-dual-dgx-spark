@@ -30,6 +30,9 @@ COLS = ["gen","pp","accpct","draftrate","tau","kv","pfx",
         "h_gpu","h_temp","h_power","h_mem","h_cpu","h_net",
         "w_gpu","w_temp","w_power","w_mem","w_cpu","w_net"]
 
+# ~2 x active params for glm-5.3-flash (derivation at the tflops fallback below)
+_EST_FLOPS_PER_TOKEN = 33.4e9
+
 # Series whose true per-bucket extremes are also returned (as <col>_mx / <col>_mn),
 # so the min/max readouts do not change when the timeframe (and thus bucket width)
 # changes. Keep this list small — each entry adds two numbers per point.
@@ -263,8 +266,17 @@ def _fill_vllm(p, now, row, slot):
         row["stepsz"] = dIt / dC if dC > 0 else None
         dCa = cur.get("cached", 0) - pv.get("cached", 0)
         row["cachedpct"] = 100.0 * dCa / dPrompt if dPrompt > 0 else None
+        # vllm:estimated_flops_per_gpu_total exists but never increments (the
+        # analytic estimator doesn't understand this kit's Glm5Next hybrid
+        # arch), so fall back to deriving it: tokens forwarded per second
+        # (dIt = generated + rejected drafts + prefill, exactly) x 2 FLOPs per
+        # active weight. Active ~16.7B from config.json geometry: 45 layers x
+        # (MLA ~117M + indexer ~17M), 3 dense FFN x 151M, 42 MoE layers x
+        # ((8 routed + 1 shared) x 3*4096*2048 + router) = 227.7M, lm_head
+        # 634M. Cluster-total FLOPs, not per-GPU.
         dF = max(0.0, cur.get("flops", 0) - pv.get("flops", 0))
-        row["tflops"] = dF / dt / 1e12 if dF > 0 else None
+        row["tflops"] = dF / dt / 1e12 if dF > 0 else (
+            _EST_FLOPS_PER_TOKEN * (dIt / dt) / 1e12 if dIt > 0 else None)
         row["accpct"] = 100 * dA / dD if dD > 0 else None
         row["draftrate"] = max(0.0, dD) / dt
         row["tau"] = 1 + dA / dN if dN > 0 else None
