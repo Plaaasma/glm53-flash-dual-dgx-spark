@@ -232,7 +232,7 @@ const fmtTok = v => v==null?"—" : v>=1e9?(v/1e9).toFixed(2)+"B" : v>=1e6?(v/1e
 const PANELS = [
  {id:"thru", t:"throughput — tok/s", series:[
    {col:"gen", n:"generate", c:C.acc, w:2, fill:1, band:1},
-   {col:"pp",  n:"prefill",  c:C.sky, w:1.5, band:1}]},
+   {col:"pp",  n:"prefill",  c:C.sky, w:1.5, band:1, axis:"r"}]},
  {id:"spec", t:"speculative decode", series:[
    {col:"accpct", n:"accept %", c:C.teal, w:2, fill:1},
    {col:"draftrate", n:"drafted tok/s", c:C.slate, dash:[3,3]}]},
@@ -275,7 +275,8 @@ const PANELS = [
 for (const p of PANELS){
   const el = document.createElement("div");
   el.className = "panel";
-  const lg = p.series ? p.series.map(s=>`<span><i style="background:${s.c}"></i>${s.n}</span>`).join("") : "";
+  const hasR = p.series && p.series.some(s=>s.axis==="r");
+  const lg = p.series ? p.series.map(s=>`<span><i style="background:${s.c}"></i>${hasR?(s.axis==="r"?s.n+" \u25b8":"\u25c2 "+s.n):s.n}</span>`).join("") : "";
   el.innerHTML = `<div class="ph"><h4>${p.t}</h4><div class="lg">${lg}</div></div><canvas class="cv" id="cv_${p.id}"></canvas>`;
   $("charts").appendChild(el);
 }
@@ -400,12 +401,12 @@ function niceTicks(t0,t1){
   return out;
 }
 const PL=46, PR=8, PT=8, PB=20;
-function autoY(p){
+function autoY(p, series){
   // Spike-aware: a cache-hit prefill burst can register 50k+ tok/s for one
   // bucket; scaling to it squashes everything. Scale to the 98th percentile
   // when the max is a lone outlier; the clip rect crops what overflows.
   const vals=[]; let lo=Infinity, hi=-Infinity, bandHi=-Infinity;
-  for (const s of p.series||[]){
+  for (const s of series||p.series||[]){
     const a=H[s.col]||[], mx=H[s.col+"_mx"], mn=H[s.col+"_mn"];
     for (let i=0;i<a.length;i++){
       const v=a[i]; if(v==null)continue;
@@ -435,39 +436,53 @@ function drawPanel(p){
   ctx.clearRect(0,0,W,Hh);
   if (!H || !H.t || !H.t.length) return;
   const t0 = view.t1-view.span, t1 = view.t1;
-  const [y0,y1] = autoY(p);
-  const X = t => PL + (W-PL-PR)*(t*1000-t0)/(t1-t0);
-  const Y = v => PT + (Hh-PT-PB)*(1-(v-y0)/(y1-y0||1));
-  // grid + axes
-  ctx.strokeStyle="#1a2028"; ctx.lineWidth=1; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.fillStyle="#4a5462";
+  const lseries = (p.series||[]).filter(s=>s.axis!=="r");
+  const rseries = (p.series||[]).filter(s=>s.axis==="r");
+  const pr = rseries.length ? 46 : PR;
+  p._pr = pr;
+  const [y0,y1] = autoY(p, lseries);
+  const [ry0,ry1] = rseries.length ? autoY(p, rseries) : [0,1];
+  const X = t => PL + (W-PL-pr)*(t*1000-t0)/(t1-t0);
+  const Yl = v => PT + (Hh-PT-PB)*(1-(v-y0)/(y1-y0||1));
+  const Yr = v => PT + (Hh-PT-PB)*(1-(v-ry0)/(ry1-ry0||1));
+  // grid + axes; with a right axis, tick labels take their series' color
+  ctx.strokeStyle="#1a2028"; ctx.lineWidth=1; ctx.font="500 9.5px 'IBM Plex Mono'";
   for (let i=0;i<=3;i++){
-    const v=y0+(y1-y0)*i/3, y=Y(v);
-    ctx.beginPath(); ctx.moveTo(PL,y); ctx.lineTo(W-PR,y); ctx.stroke();
-    ctx.textAlign="right"; ctx.fillText((p.fmt||fmtN)(v), PL-5, y+3);
+    const y = PT + (Hh-PT-PB)*(1-i/3);
+    ctx.beginPath(); ctx.moveTo(PL,y); ctx.lineTo(W-pr,y); ctx.stroke();
+    ctx.fillStyle = rseries.length && lseries.length ? lseries[0].c+"cc" : "#4a5462";
+    ctx.textAlign="right"; ctx.fillText((p.fmt||fmtN)(y0+(y1-y0)*i/3), PL-5, y+3);
+    if (rseries.length){
+      ctx.fillStyle = rseries[0].c+"cc"; ctx.textAlign="left";
+      ctx.fillText((p.fmt||fmtN)(ry0+(ry1-ry0)*i/3), W-pr+5, y+3);
+    }
   }
+  ctx.fillStyle="#4a5462";
   for (const t of niceTicks(t0,t1)){
-    const x=PL+(W-PL-PR)*(t-t0)/(t1-t0);
+    const x=PL+(W-PL-pr)*(t-t0)/(t1-t0);
     ctx.textAlign="center";
     const d=new Date(t);
     ctx.fillText(view.span>86400e3 ? `${d.getMonth()+1}/${d.getDate()}` :
       `${d.getHours()}:${String(d.getMinutes()).padStart(2,"0")}`, x, Hh-6);
   }
   // series (clipped to the plot area so off-scale spikes crop cleanly)
-  ctx.save(); ctx.beginPath(); ctx.rect(PL,PT,W-PL-PR,Hh-PT-PB); ctx.clip();
+  ctx.save(); ctx.beginPath(); ctx.rect(PL,PT,W-PL-pr,Hh-PT-PB); ctx.clip();
   for (const s of (p.series||[])){
     const a=H[s.col]||[];
+    const Y = s.axis==="r" ? Yr : Yl;
+    const sy0 = s.axis==="r" ? ry0 : y0, sy1 = s.axis==="r" ? ry1 : y1;
     // min-max band
     if (s.band && H[s.col+"_mx"] && H[s.col+"_mn"]){
       ctx.beginPath(); let started=false;
-      for(let i=0;i<H.t.length;i++){const v=H[s.col+"_mx"][i];if(v==null)continue;const x=X(H.t[i]),y=Y(Math.min(v,y1));started?ctx.lineTo(x,y):ctx.moveTo(x,y);started=true;}
-      for(let i=H.t.length-1;i>=0;i--){const v=H[s.col+"_mn"][i];if(v==null)continue;ctx.lineTo(X(H.t[i]),Y(Math.max(v,y0)));}
+      for(let i=0;i<H.t.length;i++){const v=H[s.col+"_mx"][i];if(v==null)continue;const x=X(H.t[i]),y=Y(Math.min(v,sy1));started?ctx.lineTo(x,y):ctx.moveTo(x,y);started=true;}
+      for(let i=H.t.length-1;i>=0;i--){const v=H[s.col+"_mn"][i];if(v==null)continue;ctx.lineTo(X(H.t[i]),Y(Math.max(v,sy0)));}
       if(started){ctx.closePath(); ctx.fillStyle=s.c+"1f"; ctx.fill();}
     }
     // area fill
     if (s.fill){
       ctx.beginPath(); let st2=false, firstX=null, lastX=null;
       for(let i=0;i<H.t.length;i++){const v=a[i];if(v==null)continue;const x=X(H.t[i]);st2?ctx.lineTo(x,Y(v)):ctx.moveTo(x,Y(v));if(!st2)firstX=x;st2=true;lastX=x;}
-      if(st2){ctx.lineTo(lastX,Y(y0));ctx.lineTo(firstX,Y(y0));ctx.closePath();
+      if(st2){ctx.lineTo(lastX,Y(sy0));ctx.lineTo(firstX,Y(sy0));ctx.closePath();
         const g=ctx.createLinearGradient(0,PT,0,Hh-PB);g.addColorStop(0,s.c+"30");g.addColorStop(1,s.c+"05");ctx.fillStyle=g;ctx.fill();}
     }
     // line
@@ -518,7 +533,7 @@ for (const p of PANELS){
   cv.addEventListener("pointercancel", ()=>{ drag=null; });
   cv.addEventListener("pointermove", e=>{
     if (drag){
-      const dx = e.clientX - drag.x, iw = cv.clientWidth-PL-PR;
+      const dx = e.clientX - drag.x, iw = cv.clientWidth-PL-(p._pr||PR);
       view.t1 = Math.min(Date.now(), drag.t1 - dx/iw*view.span);
       if (view.t1 < Date.now()-5000 && view.live){ view.live=false; $("livebtn").className=""; }
       drawAll();
@@ -530,7 +545,7 @@ for (const p of PANELS){
   cv.addEventListener("pointerleave", ()=> tip.style.display="none");
   cv.addEventListener("wheel", e=>{
     e.preventDefault();
-    const iw = cv.clientWidth-PL-PR;
+    const iw = cv.clientWidth-PL-(p._pr||PR);
     const frac = Math.max(0,Math.min(1,(e.offsetX-PL)/iw));
     const tCur = view.t1-view.span+frac*view.span;
     const f = Math.exp(e.deltaY*0.0015);
@@ -546,7 +561,7 @@ for (const p of PANELS){
 function crosshair(p, cv, e){
   if (!H || !H.t || !H.t.length){ tip.style.display="none"; return; }
   const t0=view.t1-view.span;
-  const frac=(e.offsetX-PL)/(cv.clientWidth-PL-PR);
+  const frac=(e.offsetX-PL)/(cv.clientWidth-PL-(p._pr||PR));
   const tq=(t0+frac*view.span)/1000;
   let bi=0, bd=Infinity;
   for(let i=0;i<H.t.length;i++){const d=Math.abs(H.t[i]-tq);if(d<bd){bd=d;bi=i;}}
