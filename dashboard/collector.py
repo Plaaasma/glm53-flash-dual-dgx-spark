@@ -432,6 +432,7 @@ def viz_udp_listener(port=9103):
             if k == "act": state["viz_act"] = f
             elif k == "sched": state["viz_sched"] = f
             elif k == "viz_status": state["viz_status"] = f
+            elif k == "act3d": state["viz_act3d"] = f
         except Exception:
             pass
 
@@ -455,8 +456,9 @@ class H(BaseHTTPRequestHandler):
             # snapshot (from the EngineCore), both arriving over UDP :9103.
             now = time.time()
             act, sch = state.get("viz_act"), state.get("viz_sched")
-            vs = state.get("viz_status")
+            vs = state.get("viz_status"); a3 = state.get("viz_act3d")
             self._send({"act": act, "act_age": (now - act["ts"]) if act else None,
+                        "act3d": a3, "act3d_age": (now - a3["ts"]) if a3 else None,
                         "sched": sch, "sched_age": (now - sch["ts"]) if sch else None,
                         "status": vs, "status_age": (now - vs["ts"]) if vs else None})
             return

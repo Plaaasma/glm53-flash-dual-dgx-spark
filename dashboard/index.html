@@ -154,6 +154,21 @@ body.ambient #main{padding:14px}
 body.ambient #agrid{grid-template-columns:2fr 1fr;grid-auto-rows:minmax(0,1fr);height:calc(100vh - 70px)}
 body.ambient .apanel{display:flex;flex-direction:column}
 body.ambient .apanel canvas{flex:1;height:auto!important;min-height:0}
+#agrid3d{display:grid;grid-template-columns:2fr 1fr 1fr;grid-template-rows:330px 300px;gap:14px}
+#agrid3d .cortex{grid-row:1 / 3}
+#agrid3d canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+#agrid3d .apanel{display:flex;flex-direction:column;min-height:0}
+#agrid3d .apanel canvas{flex:1;min-height:0}
+@media(max-width:1100px){#agrid3d{grid-template-columns:1fr 1fr;grid-template-rows:320px 260px 260px}#agrid3d .cortex{grid-column:1 / -1;grid-row:1}}
+#agrid[hidden],#agrid3d[hidden]{display:none!important}
+#gaugestrip{margin-top:14px}
+#gaugestrip canvas{height:150px}
+body.ambient #agrid3d{height:calc(100vh - 250px);grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+body.ambient #gaugestrip .apanel{display:block}
+body.ambient #gaugestrip canvas{height:120px!important;flex:none}
+#ambient .ah .mode{background:transparent;border:1px solid var(--line2);color:var(--ghost);font:600 10.5px 'IBM Plex Mono',monospace;padding:5px 10px;cursor:pointer;border-radius:3px;margin-left:auto}
+#ambient .ah .mode.on{color:var(--acc);border-color:var(--acc)}
+#ambient .ah button#ambient_btn{margin-left:8px}
 </style>
 </head>
 <body>
@@ -234,14 +249,21 @@ body.ambient .apanel canvas{flex:1;height:auto!important;min-height:0}
       <div class="meta"><span id="b_elapsed"></span><span id="b_pct"></span><span id="b_eta"></span></div>
     </div>
     <div id="ambient">
-      <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button id="ambient_btn">AMBIENT ▸</button></div>
-      <div id="agrid">
+      <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
+      <div id="agrid3d">
+        <div class="apanel cortex"><div class="ph"><h4>cortex — token paths through 42 moe layers × 288 experts</h4><span class="sub" id="cx_sub">drag to orbit · wheel to zoom</span></div><canvas id="cv3_cortex"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas></div>
+      </div>
+      <div id="agrid" hidden>
         <div class="apanel"><div class="ph"><h4>expert routing — 42 layers × 288 experts</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
         <div class="apanel"><div class="ph"><h4>attention scan — where each MLA layer reads</h4><span class="sub" id="scan_sub">context →</span></div><canvas id="cv_scan"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual stream — per-layer magnitude</h4><span class="sub" id="ribbon_sub">—</span></div><canvas id="cv_ribbon"></canvas></div>
         <div class="apanel"><div class="ph"><h4>kv pool — 2.1M tokens</h4><span class="sub" id="kv_sub">—</span></div><canvas id="cv_kv"></canvas></div>
-        <div class="apanel" style="grid-column:1 / -1"><div class="ph"><h4>reactor — bandwidth · power · thermals · clocks</h4><span class="sub" id="gauge_sub">—</span></div><canvas id="cv_gauge"></canvas></div>
       </div>
+      <div id="gaugestrip"><div class="apanel"><div class="ph"><h4>reactor — bandwidth · power · thermals · clocks</h4><span class="sub" id="gauge_sub">—</span></div><canvas id="cv_gauge"></canvas></div></div>
     </div>
     <div id="charts"></div>
     <footer>spark//console · collector :9102 · agents :9101 · drag pan · wheel zoom · double-click reset</footer>
@@ -249,6 +271,7 @@ body.ambient .apanel canvas{flex:1;height:auto!important;min-height:0}
 </div>
 <div id="tip"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 "use strict";
 const API = new URLSearchParams(location.search).get("api") || `${location.protocol}//${location.hostname}:9102`;
@@ -628,6 +651,7 @@ async function fetchViz(){
     if (d.act && d.act_age < 5){
       st.textContent = `live · step ${d.act.step} · ${d.act.T} tok/step · ${VIZ.fps.toFixed(0)} fps`; st.className = "st on";
       if (d.act.step !== VIZ.lastStep){ VIZ.lastStep = d.act.step; VIZ.frames++; ingestAct(d.act); }
+      if (d.act3d && d.act3d.step !== VIZ.lastStep3){ VIZ.lastStep3 = d.act3d.step; ingestAct3d(d.act3d); }
     } else {
       const s = d.status && d.status_age < 6 ? d.status : null;
       st.textContent = s ? (s.dead ? `hooks disabled — ${s.reason}` : `hooks armed (rank ${s.rank}, ${s.n_moe} moe / ${s.n_mla} mla, step ${s.last_step}${s.meta ? ", meta " + s.meta.join("/") : ""}${s.errors ? ", " + s.errors + " errors: " + s.last_error : ""}) — waiting for frames`)
@@ -646,7 +670,7 @@ function ingestAct(a){
   if (!VIZ.scan || VIZ.scan.length !== LM*256) VIZ.scan = new Float32Array(LM*256);
   for (let i=0;i<LM*256;i++) VIZ.scan[i] = Math.max(VIZ.scan[i]*0.80, S[i]/255);
   VIZ.rib.push(a.ribbon.slice(0, a.n_all)); if (VIZ.rib.length > 240) VIZ.rib.shift();
-  VIZ.act = a;
+  VIZ.act = a; for (const sc of Object.values(S3)) sc.dirty = true;
 }
 function cvctx(id){ const cv=$(id); const dpr=devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight; if(!W||!H) return null;
   if (cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
@@ -727,7 +751,196 @@ function drawGauges(){
   $("gauge_sub").textContent = `≈ ${gb.toFixed(0)} GB/s of ${273} peak per rank`;
 }
 function idleText(ctx,W,H,msg){ ctx.fillStyle="#4a5462"; ctx.font="500 11px 'IBM Plex Mono'"; ctx.textAlign="center"; ctx.fillText(msg, W/2, H/2+4); }
-function drawViz(){ drawBrain(); drawScan(); drawRibbon(); drawKV(); drawGauges(); }
+function drawViz(){ if (VIZ.three){ draw3D(); } else { drawBrain(); drawScan(); drawRibbon(); drawKV(); } drawGauges(); }
+
+/* ---------------- 3-D views (three.js) ---------------- */
+VIZ.three = (localStorage.getItem("viz_mode") || "3d") === "3d";
+VIZ.a3 = null; VIZ.lastStep3 = -1; VIZ.space = []; VIZ.spaceStat = null;
+const f16 = u => { const s=(u>>15)&1, e=(u>>10)&31, m=u&1023; let v = e===0 ? m*Math.pow(2,-24) : e===31 ? (m?NaN:Infinity) : (1+m/1024)*Math.pow(2,e-15); return s?-v:v; };
+function ingestAct3d(a){
+  const rb = Uint8Array.from(atob(a.routing3d), c=>c.charCodeAt(0)); a.r3 = new Int16Array(rb.buffer, 0, rb.byteLength>>1);
+  a.at = b64u8(a.attn3d);
+  const hb = Uint8Array.from(atob(a.h3), c=>c.charCodeAt(0)); const hu = new Uint16Array(hb.buffer, 0, hb.byteLength>>1);
+  a.pts = new Float32Array(hu.length); for (let i=0;i<hu.length;i++) a.pts[i] = f16(hu[i]);
+  VIZ.a3 = a;
+  // activation-space history (per token index), with running normalisation
+  const T = a.T3, st = VIZ.spaceStat || (VIZ.spaceStat = {m:[0,0,0], v:[1,1,1]});
+  for (let t=0;t<T;t++) for (let k=0;k<3;k++){ const x=a.pts[t*3+k]; if(!isFinite(x)) continue; st.m[k]+= (x-st.m[k])*0.02; st.v[k]+= ((x-st.m[k])*(x-st.m[k])-st.v[k])*0.02; }
+  VIZ.space.push({T, p:a.pts, hues:tokenReqHue(a)}); if (VIZ.space.length > 90) VIZ.space.shift();
+  for (const sc of Object.values(S3)) sc.dirty = true;
+}
+const S3 = {};
+function tokenReqHue(a){ const out = new Array(Math.max(a.T3, a.TA)).fill(null); if (!a.reqs) return out; for (const [id,start,count] of a.reqs){ const c = new THREE.Color().setHSL(reqHue(id), 0.85, 0.6); for (let t=start;t<start+count&&t<out.length;t++) out[t]=c; } return out; }
+function mk3(id){
+  const el = $(id); if (!el || !window.THREE) return null;
+  const r = new THREE.WebGLRenderer({canvas:el, antialias:true, alpha:false, powerPreference:"high-performance"});
+  r.setPixelRatio(Math.min(devicePixelRatio||1, 2)); r.setClearColor(0x0b0d10, 1);
+  const s = new THREE.Scene(); const c = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+  const o = {r, s, c, el, dirty:true, theta:0.6, phi:1.15, rad:60, target:new THREE.Vector3(), auto:true, lastDrag:0};
+  el.addEventListener("pointerdown", e=>{ o.drag={x:e.clientX,y:e.clientY,th:o.theta,ph:o.phi}; el.setPointerCapture(e.pointerId); el.style.cursor="grabbing"; });
+  el.addEventListener("pointermove", e=>{ if(!o.drag) return; o.theta = o.drag.th - (e.clientX-o.drag.x)*0.008; o.phi = Math.max(0.15, Math.min(2.9, o.drag.ph - (e.clientY-o.drag.y)*0.008)); o.lastDrag = Date.now(); });
+  el.addEventListener("pointerup", ()=>{ o.drag=null; el.style.cursor="grab"; }); el.addEventListener("pointercancel", ()=>{ o.drag=null; });
+  el.addEventListener("wheel", e=>{ e.preventDefault(); o.rad = Math.max(8, Math.min(200, o.rad*Math.exp(e.deltaY*0.0012))); o.lastDrag = Date.now(); }, {passive:false});
+  el.addEventListener("dblclick", ()=>{ o.theta=0.6; o.phi=1.15; o.rad=o.rad0||60; });
+  return o;
+}
+function place(o){
+  const W = o.el.clientWidth, H = o.el.clientHeight; if (!W||!H) return false;
+  const need = o.el.width !== Math.round(W*(Math.min(devicePixelRatio||1,2))) ;
+  if (need){ o.r.setSize(W, H, false); o.c.aspect = W/H; o.c.updateProjectionMatrix(); }
+  if (o.auto && !o.drag && Date.now()-o.lastDrag > 4000) o.theta += 0.0025;
+  const sp = Math.sin(o.phi); o.c.position.set(o.target.x + o.rad*sp*Math.sin(o.theta), o.target.y + o.rad*Math.cos(o.phi), o.target.z + o.rad*sp*Math.cos(o.theta));
+  o.c.lookAt(o.target); return true;
+}
+const heat3 = (v, out) => { const t=Math.min(1,Math.max(0,v)); out[0]=(t<0.5?20+(t/0.5)*40:60+((t-0.5)/0.5)*140)/255*t; out[1]=(40+t*200)/255*t; out[2]=(t<0.5?60+(t/0.5)*120:180-((t-0.5)/0.5)*120)/255*t; return out; };
+const tokenHue = (i, n, out) => { const h=(i/Math.max(n,1))*0.85, c=new THREE.Color().setHSL(h, 0.9, 0.6); out[0]=c.r; out[1]=c.g; out[2]=c.b; return out; };
+const addMat = (extra={}) => Object.assign({color:0xffffff, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false}, extra);
+
+/* cortex: one brain per request. Each brain = 42 layers deep x 24x12 expert grid; strands = that request's tokens */
+const CX = {L:42, E:288, cols:24, dz:1.3, gapX:32, gapY:20};
+const cellXY = (e) => [ (e%CX.cols) - (CX.cols-1)/2, Math.floor(e/CX.cols) - (CX.E/CX.cols-1)/2 ];
+const reqHue = (id) => { let x=0; for (const ch of id) x=(x*31+ch.charCodeAt(0))>>>0; return (x%360)/360; };
+const BR = {byId:new Map(), order:[]};      // request id -> brain state
+function initCortex(){
+  const o = mk3("cv3_cortex"); if (!o) return; o.rad = o.rad0 = 70; o.target.set(0, 0, -CX.dz*(CX.L-1)/2); o.brains = new Map(); S3.cortex = o;
+}
+function newBrain(o, id){
+  const geo = new THREE.BoxGeometry(0.46, 0.46, 0.26); const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial(addMat({opacity:0.7})), CX.L*CX.E);
+  const m = new THREE.Matrix4(), col = new THREE.Color(0.02,0.03,0.04);
+  for (let l=0;l<CX.L;l++) for (let e=0;e<CX.E;e++){ const [x,y]=cellXY(e); m.makeTranslation(x, y, -l*CX.dz); mesh.setMatrixAt(l*CX.E+e, m); mesh.setColorAt(l*CX.E+e, col); }
+  mesh.instanceMatrix.needsUpdate = true;
+  const maxSeg = 16*9*(CX.L-1), pg = new THREE.BufferGeometry();
+  pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(maxSeg*2*3),3)); pg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(maxSeg*2*3),3));
+  const paths = new THREE.LineSegments(pg, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity:0.35}))); paths.frustumCulled = false;
+  const fg = new THREE.BufferGeometry(); const fp=[]; const hx=CX.cols/2, hy=(CX.E/CX.cols)/2;
+  for (const l of [0, CX.L-1]){ const z=-l*CX.dz; fp.push(-hx,-hy,z, hx,-hy,z, hx,-hy,z, hx,hy,z, hx,hy,z, -hx,hy,z, -hx,hy,z, -hx,-hy,z); }
+  fg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fp),3));
+  const grp = new THREE.Group(); grp.add(mesh); grp.add(paths); grp.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({color:0x2a323d}))); o.s.add(grp);
+  return {id, grp, mesh, paths, hist:new Float32Array(CX.L*CX.E), seen:Date.now(), hue:reqHue(id), tokens:0};
+}
+function layoutBrains(o){
+  const list = [...o.brains.values()].sort((a,b)=> a.id<b.id?-1:1), n = list.length || 1, cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n/cols);
+  list.forEach((b,i)=>{ const cx=(i%cols)-(cols-1)/2, cy=(rows-1)/2-Math.floor(i/cols); b.grp.position.set(cx*CX.gapX, cy*CX.gapY, 0); });
+  o.rad0 = 62 + Math.max(cols, rows)*22; if (!o.drag && Date.now()-o.lastDrag > 4000) o.rad += (o.rad0 - o.rad)*0.05;
+}
+function drawCortex(){
+  const o = S3.cortex; if (!o || !place(o)) return;
+  const a = VIZ.a3;
+  if (o.dirty && a){
+    const reqs = (a.reqs && a.reqs.length) ? a.reqs : [["all", 0, a.T3]];
+    const now = Date.now(), c = new THREE.Color(), rgb=[0,0,0], K=9, Lr=Math.min(a.n_moe, CX.L), T=a.T3;
+    for (const b of o.brains.values()){ for (let i=0;i<b.hist.length;i++) b.hist[i]*=0.82; b.tokens=0; }
+    for (const [id, start, count] of reqs){
+      let b = o.brains.get(id); if (!b){ b = newBrain(o, id); o.brains.set(id, b); layoutBrains(o); }
+      b.seen = now; b.tokens = count;
+      const pos = b.paths.geometry.attributes.position.array, cl = b.paths.geometry.attributes.color.array; let n=0;
+      const hc = new THREE.Color().setHSL(b.hue, 0.85, 0.6);
+      for (let t=start; t<Math.min(start+count, T); t++) for (let k=0;k<K;k++){
+        for (let l=0;l<Lr;l++){ const e=a.r3[(l*T+t)*K+k]; if (e>=0 && e<CX.E) b.hist[l*CX.E+e] = Math.min(1, b.hist[l*CX.E+e] + 0.35); }
+        for (let l=0;l<Lr-1 && n<16*9*(CX.L-1);l++){ const e0=a.r3[(l*T+t)*K+k], e1=a.r3[((l+1)*T+t)*K+k]; if (e0<0||e1<0||e0>=CX.E||e1>=CX.E) continue;
+          const [x0,y0]=cellXY(e0), [x1,y1]=cellXY(e1); pos.set([x0,y0,-l*CX.dz, x1,y1,-(l+1)*CX.dz], n*6); cl.set([hc.r,hc.g,hc.b, hc.r,hc.g,hc.b], n*6); n++; } }
+      b.paths.geometry.setDrawRange(0, n*2); b.paths.geometry.attributes.position.needsUpdate = true; b.paths.geometry.attributes.color.needsUpdate = true;
+    }
+    for (const [id, b] of [...o.brains]){ if (now - b.seen > 12000){ o.s.remove(b.grp); o.brains.delete(id); layoutBrains(o); continue; }
+      for (let i=0;i<b.hist.length;i++){ const v=b.hist[i]; if (v<0.03){ b.mesh.setColorAt(i, c.setRGB(0.006,0.008,0.011)); continue; } heat3(v*0.85, rgb); b.mesh.setColorAt(i, c.setRGB(rgb[0]*0.55, rgb[1]*0.55, rgb[2]*0.55)); }
+      b.mesh.instanceColor.needsUpdate = true; }
+    const live = [...o.brains.values()].filter(b=>b.tokens>0);
+    $("cx_sub").innerHTML = live.length ? live.map(b=>`<span style="color:hsl(${b.hue*360},85%,60%)">■</span> ${b.id} · ${b.tokens} tok`).join(" &nbsp; ") : "no requests in this step";
+    o.dirty = false;
+  }
+  if (o.brains.size) layoutBrains(o);
+  o.r.render(o.s, o.c);
+}
+/* attention volume: points at (context bin, token, layer) */
+const AV = {L:13, T:16, B:64};
+function initAttn(){
+  const o = mk3("cv3_attn"); if (!o) return; o.rad = o.rad0 = 48; o.theta = 0.9; o.target.set(0, 0, -(AV.L-1)*1.0);
+  const n = AV.L*AV.T*AV.B, pos = new Float32Array(n*3), col = new Float32Array(n*3);
+  for (let l=0;l<AV.L;l++) for (let t=0;t<AV.T;t++) for (let b=0;b<AV.B;b++){ const i=(l*AV.T+t)*AV.B+b; pos[i*3]=(b-(AV.B-1)/2)*0.5; pos[i*3+1]=(t-(AV.T-1)/2)*1.1; pos[i*3+2]=-l*2.0; }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos,3)); g.setAttribute("color", new THREE.BufferAttribute(col,3));
+  o.pts = new THREE.Points(g, new THREE.PointsMaterial(addMat({vertexColors:true, size:0.42, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
+  o.acc = new Float32Array(n); S3.attn = o;
+}
+function drawAttn(){
+  const o = S3.attn; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.a3){ const a = VIZ.a3, L=Math.min(a.n_mla, AV.L), T=a.TA, B=a.bins, col=o.pts.geometry.attributes.color.array;
+    for (let i=0;i<o.acc.length;i++){ o.acc[i]*=0.6; if (o.acc[i]<0.05) o.acc[i]=0; }
+    for (let l=0;l<L;l++) for (let t=0;t<T;t++) for (let b=0;b<B&&b<AV.B;b++){ const v=a.at[(l*T+t)*B+b]/255; const i=(l*AV.T+t)*AV.B+b; if (v>o.acc[i]) o.acc[i]=v; }
+    const tr = tokenReqHue(a); for (let i=0;i<o.acc.length;i++){ const v=o.acc[i] < 0.12 ? 0 : o.acc[i]; const t=Math.floor(i/AV.B)%AV.T; const hc = tr[t]; col[i*3]=(hc?hc.r:0.32)*v; col[i*3+1]=(hc?hc.g:0.72)*v; col[i*3+2]=(hc?hc.b:1.0)*v; }
+    o.pts.geometry.attributes.color.needsUpdate = true; $("av_sub").textContent = `${L} mla layers · ${T} tokens · ${B} context bins`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* activation space: hidden-state trajectories */
+function initSpace(){
+  const o = mk3("cv3_space"); if (!o) return; o.rad = o.rad0 = 34; o.phi = 1.0;
+  const N = 32*90; const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*3),3)); pg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*3),3));
+  o.pts = new THREE.Points(pg, new THREE.PointsMaterial(addMat({vertexColors:true, size:1.1, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
+  const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*2*3),3)); lg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*2*3),3));
+  o.trails = new THREE.LineSegments(lg, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity:0.55}))); o.trails.frustumCulled=false; o.s.add(o.trails);
+  const ax = new THREE.BufferGeometry(); ax.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-14,0,0,14,0,0, 0,-14,0,0,14,0, 0,0,-14,0,0,14]),3)); o.s.add(new THREE.LineSegments(ax, new THREE.LineBasicMaterial({color:0x1e242c})));
+  S3.space = o;
+}
+function drawSpace(){
+  const o = S3.space; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.space.length){ const st = VIZ.spaceStat, H = VIZ.space, pos=o.pts.geometry.attributes.position.array, col=o.pts.geometry.attributes.color.array, lp=o.trails.geometry.attributes.position.array, lc=o.trails.geometry.attributes.color.array;
+    const nrm = (x,k)=> Math.max(-14, Math.min(14, (x-st.m[k])/Math.sqrt(st.v[k]+1e-6)*5.5)); let n=0, s=0; const rgb=[0,0,0];
+    for (let h=0;h<H.length;h++){ const age = 1-(h/(H.length-1||1)), f=H[h], T=f.T;
+      const trh = f.hues; for (let t=0;t<T;t++){ const x=nrm(f.p[t*3],0), y=nrm(f.p[t*3+1],1), z=nrm(f.p[t*3+2],2); if (trh && trh[t]){ rgb[0]=trh[t].r; rgb[1]=trh[t].g; rgb[2]=trh[t].b; } else tokenHue(t, T, rgb); const w=Math.pow(1-age, 1.5)*0.9+0.05;
+        pos.set([x,y,z], n*3); col.set([rgb[0]*w, rgb[1]*w, rgb[2]*w], n*3); n++;
+        if (h>0 && t<H[h-1].T){ const g=H[h-1]; lp.set([nrm(g.p[t*3],0),nrm(g.p[t*3+1],1),nrm(g.p[t*3+2],2), x,y,z], s*6); lc.set([rgb[0]*w*0.6,rgb[1]*w*0.6,rgb[2]*w*0.6, rgb[0]*w,rgb[1]*w,rgb[2]*w], s*6); s++; } } }
+    o.pts.geometry.setDrawRange(0,n); o.trails.geometry.setDrawRange(0,s*2);
+    for (const g of [o.pts.geometry, o.trails.geometry]){ g.attributes.position.needsUpdate=true; g.attributes.color.needsUpdate=true; }
+    $("as_sub").textContent = `${H[H.length-1].T} tokens · ${H.length} steps of trail`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* residual terrain: heightfield over (layer, time) */
+const RT = {W:46, D:120};
+function initTerrain(){
+  const o = mk3("cv3_terrain"); if (!o) return; o.rad = o.rad0 = 70; o.theta = 0.35; o.phi = 1.05; o.target.set(0, 3, -RT.D*0.5*0.5); o.auto = false;
+  const n = RT.W*RT.D, pos = new Float32Array(n*3), col = new Float32Array(n*3), idx = [];
+  for (let d=0; d<RT.D; d++) for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; pos[i*3]=(w-(RT.W-1)/2)*0.9; pos[i*3+1]=0; pos[i*3+2]=-d*0.5; }
+  for (let d=0; d<RT.D-1; d++) for (let w=0; w<RT.W-1; w++){ const a=d*RT.W+w, b=a+1, c=a+RT.W, e=c+1; idx.push(a,c,b, b,c,e); }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos,3)); g.setAttribute("color", new THREE.BufferAttribute(col,3)); g.setIndex(idx);
+  o.mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, side:THREE.DoubleSide, transparent:true, opacity:0.85})); o.s.add(o.mesh);
+  o.wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:0xc8f542, wireframe:true, transparent:true, opacity:0.12})); o.s.add(o.wire);
+  S3.terrain = o;
+}
+function drawTerrain(){
+  const o = S3.terrain; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.rib.length){ const H = VIZ.rib.slice(-RT.D), pos=o.mesh.geometry.attributes.position.array, col=o.mesh.geometry.attributes.color.array; let mx=1e-6; for (const r of H) for (const v of r) if (v>mx) mx=v;
+    for (let d=0; d<RT.D; d++){ const r = H[H.length-1-d]; for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; const v = r && w<r.length ? r[w]/mx : 0; pos[i*3+1] = v*9; const t=Math.pow(v,0.8); col[i*3]=0.08+0.7*t; col[i*3+1]=0.16+0.8*t; col[i*3+2]=0.2+0.05*t; } }
+    o.mesh.geometry.attributes.position.needsUpdate=true; o.mesh.geometry.attributes.color.needsUpdate=true; o.mesh.geometry.computeBoundingSphere();
+    $("rt_sub").textContent = `${H.length} steps · peak layer ${H[H.length-1].indexOf(Math.max(...H[H.length-1]))}`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* kv rack: requests as rows of blocks */
+function initKV3(){
+  const o = mk3("cv3_kv"); if (!o) return; o.rad = o.rad0 = 40; o.theta = 0.5; o.phi = 1.0; o.target.set(0, 0, -8);
+  o.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8,1,0.8), new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.95}), 8*96);
+  o.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(8*96*3), 3);   // must exist before the first render or the shader ignores per-instance colour
+  o.mesh.count = 0; o.s.add(o.mesh);
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(96, 20), new THREE.MeshBasicMaterial({color:0x12161c, side:THREE.DoubleSide})); fl.rotation.x = -Math.PI/2; fl.position.set(0,-0.81,-8); o.s.add(fl);
+  S3.kv = o;
+}
+function drawKV3(){
+  const o = S3.kv; if (!o || !place(o)) return;
+  const s = VIZ.sched; if (s && (o.dirty || s.ts !== o.lastTs)){ o.lastTs = s.ts; const pool = s.pool_tokens || 2146153, pal=[C.acc,C.sky,C.coral,C.lav,C.gold,C.teal,C.pink,"#9db4ff"]; const m=new THREE.Matrix4(), c=new THREE.Color(); let n=0;
+    (s.reqs||[]).slice(0,8).forEach((r,k)=>{ const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))), done=Math.round(nb*r.computed/Math.max(r.total,1)); const z=-(k-3.5)*2.2;
+      for (let i=0;i<nb&&n<768;i++){ const isHead = (r.computed<r.prompt && i===done), h = i<done ? 1.8 : 0.5; m.makeScale(1, isHead?2.6:h, 1); m.setPosition((i-(nb-1)/2)*0.95, (isHead?2.6:h)/2-0.8, z); o.mesh.setMatrixAt(n, m); c.set(pal[k%8]); if (i>=done && !isHead) c.multiplyScalar(0.3); if (isHead) c.set(0xffffff); o.mesh.setColorAt(n, c); n++; } });
+    o.mesh.count = n; o.mesh.instanceMatrix.needsUpdate = true; if (o.mesh.instanceColor) o.mesh.instanceColor.needsUpdate = true;
+    $("kv3_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting · 1 block ≈ ${Math.round(pool/384/1000)}K tokens`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+let init3done = false;
+function draw3D(){
+  if (!window.THREE){ $("cx_sub").textContent = "three.js failed to load"; return; }
+  if (!init3done){ init3done = true; initCortex(); initAttn(); initSpace(); initTerrain(); initKV3(); }
+  drawCortex(); drawAttn(); drawSpace(); drawTerrain(); drawKV3();
+}
+function setMode(three){ VIZ.three = three; localStorage.setItem("viz_mode", three?"3d":"2d"); $("mode_btn").textContent = three?"3D":"2D"; $("mode_btn").className = "mode"+(three?" on":""); $("agrid3d").hidden = !three; $("agrid").hidden = three; for (const sc of Object.values(S3)) sc.dirty = true; }
+$("mode_btn").onclick = ()=> setMode(!VIZ.three);
+setMode(VIZ.three);
+if (new URLSearchParams(location.search).get("mode") === "2d") setMode(false);
 $("ambient_btn").onclick = () => { VIZ.ambient = !VIZ.ambient; document.body.classList.toggle("ambient", VIZ.ambient); $("ambient_btn").textContent = VIZ.ambient ? "◂ EXIT" : "AMBIENT ▸"; drawViz(); };
 document.addEventListener("keydown", e => { if (e.key === "Escape" && VIZ.ambient) $("ambient_btn").click(); });
 if (new URLSearchParams(location.search).get("ambient") === "1") $("ambient_btn").click();

@@ -23,6 +23,7 @@ _UDP = os.environ.get("GLM53_VIZ_UDP", "127.0.0.1:9103")
 _HZ = float(os.environ.get("GLM53_VIZ_HZ", "12"))
 MAX_T = int(os.environ.get("GLM53_VIZ_MAX_T", "256"))   # tokens per step we record (decode+mixed steps)
 N_EXPERTS, TOPK, N_MOE, N_MLA, N_ALL, TOPK_ATTN, ATTN_BINS = 288, 9, 43, 13, 46, 2048, 256
+MAX_T3, MAX_TA, ATTN3_BINS = 32, 16, 64      # per-token 3D frame: routing tokens, attention tokens, context bins
 
 
 def enabled() -> bool:
@@ -37,6 +38,7 @@ class _State:
         self.mla_ord: dict = {}
         self.rank = -1
         self.capture_seen = 0.0     # last time a hook ran inside a CUDA graph capture
+        self.batch = []             # [(request id tail, first token index, token count)] for the current step
 
     def init(self, device: torch.device):
         if self.ready:
@@ -59,13 +61,17 @@ class _State:
             self.d_attn = dz(N_MLA, MAX_T, TOPK_ATTN)
             self.d_ribbon = dz(N_ALL, dt=torch.float32)
             self.d_meta = dz(4)                        # [step, T, -, -]
+            self.d_h3 = dz(MAX_T, 3, dt=torch.float32) # final hidden state, random-projected to 3D
+            self.h_h3 = None                           # pinned twin, created with the others below
+            self.proj = None                           # [hidden, 3] fixed random projection (lazy, eager step)
             self.d_one = torch.ones(1, dtype=torch.int32, device=device)
             pin = lambda *s, dt=torch.int32: torch.zeros(*s, dtype=dt, pin_memory=True)
             self.h_routing = pin(N_MOE, MAX_T, TOPK)
             self.h_attn = pin(N_MLA, MAX_T, TOPK_ATTN)
             self.h_ribbon = pin(N_ALL, dt=torch.float32)
             self.h_meta = pin(4)
-            for nm in ("h_routing", "h_attn", "h_ribbon", "h_meta"):
+            self.h_h3 = pin(MAX_T, 3, dt=torch.float32)
+            for nm in ("h_routing", "h_attn", "h_ribbon", "h_meta", "h_h3"):
                 b = getattr(self, nm)
                 if not b.is_pinned():
                     setattr(self, nm, b.pin_memory())
@@ -167,6 +173,35 @@ def record_ribbon(layer_idx: int, hidden: torch.Tensor) -> None:
         _disarm("record_ribbon", e)
 
 
+def set_batch(input_batch) -> None:
+    """Per-request token spans of the step (CPU data only; called by the model runner each step)."""
+    if not _ON or _DEAD:
+        return
+    try:
+        ids = list(input_batch.req_ids)[: input_batch.num_reqs]
+        qsl = input_batch.query_start_loc_np
+        S.batch = [(str(r)[-8:], int(qsl[i]), int(qsl[i + 1] - qsl[i])) for i, r in enumerate(ids)]
+    except Exception as e:
+        _disarm("set_batch", e)
+
+
+def record_hidden3d(hidden: torch.Tensor) -> None:
+    """Final residual stream [T, hidden] -> fixed random 3-D projection (one tiny matmul)."""
+    if not _ON or _DEAD or not S.ready:
+        return
+    try:
+        if S.proj is None or S.proj.shape[0] != hidden.shape[-1]:
+            if torch.cuda.is_current_stream_capturing():
+                return                              # created on an eager step (profile run), never inside a capture
+            g = torch.Generator(device="cpu").manual_seed(53)
+            p = torch.randn(hidden.shape[-1], 3, generator=g)
+            S.proj = (p / p.norm(dim=0, keepdim=True)).to(hidden.device)
+        t = min(hidden.shape[0], MAX_T)
+        S.d_h3[:t].copy_(hidden[:t].float() @ S.proj)
+    except Exception as e:
+        _disarm("record_hidden3d", e)
+
+
 def end_step() -> None:
     """Nothing to enqueue: all recording is device-side; the publisher pulls."""
     return
@@ -202,6 +237,29 @@ def _fold(state: _State, T: int, n_moe: int, n_mla: int) -> dict:
     }
 
 
+def _fold3d(state: _State, T: int, n_moe: int, n_mla: int) -> dict:
+    """Per-token frame for the 3-D views (second datagram; ~50 KB)."""
+    T3, TA = max(1, min(T, MAX_T3)), max(1, min(T, MAX_TA))
+    r = state.h_routing[:n_moe, :T3].numpy().astype(np.int16)              # [L, T3, K]
+    a = state.h_attn[:n_mla, :TA].numpy()                                   # [L, TA, 2048]
+    ah = np.zeros((N_MLA, MAX_TA, ATTN3_BINS), dtype=np.uint8)
+    for l in range(n_mla):
+        for t in range(TA):
+            idx = a[l, t]; valid = idx >= 0
+            if not valid.any():
+                continue
+            ctx = int(idx.max()) + 1
+            rel = np.clip((idx[valid].astype(np.float32) * (ATTN3_BINS / max(ctx, 1))).astype(np.int32), 0, ATTN3_BINS - 1)
+            hcount = np.bincount(rel, minlength=ATTN3_BINS).astype(np.float32)
+            ah[l, t] = np.clip(hcount * (255.0 / max(hcount.max(), 1.0)), 0, 255).astype(np.uint8)
+    h3 = state.h_h3[:T3].numpy().astype(np.float16)
+    return {"kind": "act3d", "ts": time.time(), "T3": T3, "TA": TA, "n_moe": n_moe, "n_mla": n_mla, "bins": ATTN3_BINS,
+            "reqs": [list(b) for b in state.batch if b[1] < T3],
+            "routing3d": base64.b64encode(r.tobytes()).decode(),
+            "attn3d": base64.b64encode(ah[:n_mla, :TA].tobytes()).decode(),
+            "h3": base64.b64encode(h3.tobytes()).decode()}
+
+
 def _publisher(state: _State) -> None:
     host, port = _UDP.rsplit(":", 1)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -221,9 +279,14 @@ def _publisher(state: _State) -> None:
                 sock.sendto(json.dumps(st).encode(), (host, int(port)))
             except Exception:
                 pass
-        if now - state.capture_seen < 3.0:
-            continue                                # a CUDA graph capture is (or just was) in progress: any
-        try:                                        # sync/copy from this thread would invalidate it (global mode)
+        # Never touch the GPU until at least one CUDA graph capture has been seen AND
+        # 6 s have passed since the last one. vLLM captures only at boot (global
+        # capture mode): a sync/copy from this thread during a capture invalidates it,
+        # and the warmup forward right before the first capture is eager, so a stamp-
+        # only guard has a race window at the start of every capture.
+        if state.capture_seen == 0.0 or now - state.capture_seen < 6.0:
+            continue
+        try:
           with torch.inference_mode():
             with torch.cuda.stream(state.pub_stream):
                 state.h_meta.copy_(state.d_meta, non_blocking=True)
@@ -238,10 +301,13 @@ def _publisher(state: _State) -> None:
                 state.h_routing[:n_moe, :T].copy_(state.d_routing[:n_moe, :T], non_blocking=True)
                 state.h_attn[:n_mla, :T].copy_(state.d_attn[:n_mla, :T], non_blocking=True)
                 state.h_ribbon.copy_(state.d_ribbon, non_blocking=True)
+                state.h_h3.copy_(state.d_h3, non_blocking=True)
             state.pub_stream.synchronize()
             frame = _fold(state, T, n_moe, n_mla)
-          frame["step"] = step
+            frame3 = _fold3d(state, T, n_moe, n_mla)
+          frame["step"] = step; frame3["step"] = step
           sock.sendto(json.dumps(frame).encode(), (host, int(port)))
+          sock.sendto(json.dumps(frame3).encode(), (host, int(port)))
         except Exception as e:
             errs += 1; last_err = f"{type(e).__name__}: {str(e)[:140]}"
 
@@ -269,6 +335,25 @@ def synth(seconds: float = 30.0, hz: float = 10.0, T: int = 16) -> None:
                  "routing": base64.b64encode(hist.tobytes()).decode(), "attn": base64.b64encode(ah.tobytes()).decode(),
                  "ribbon": [round(float(v), 3) for v in rib]}
         sock.sendto(json.dumps(frame).encode(), (host, int(port)))
+        T3, TA = min(T, MAX_T3), min(T, MAX_TA)
+        r3 = np.zeros((N_MOE, T3, TOPK), dtype=np.int16)
+        reqs = [["req-aaaa1111", 0, T3 // 2], ["req-bbbb2222", T3 // 2, T3 - T3 // 2]]
+        hot2 = [hot, (hot + 97) % N_EXPERTS]
+        for t in range(T3):
+            base = rng.choice(N_EXPERTS, TOPK, replace=False, p=_p(hot2[0 if t < T3 // 2 else 1], N_EXPERTS, rng))
+            for l in range(N_MOE):
+                drift = rng.integers(-2, 3, TOPK) if rng.random() < 0.6 else 0
+                r3[l, t] = np.clip(base + drift + (l % 3), 0, N_EXPERTS - 1)
+        a3 = np.zeros((N_MLA, TA, ATTN3_BINS), dtype=np.uint8); x = np.arange(ATTN3_BINS)
+        for l in range(N_MLA):
+            for t in range(TA):
+                c = ATTN3_BINS * (0.2 + 0.6 * ((step * 0.01 + t * 0.05 + l * 0.07) % 1.0))
+                a3[l, t] = np.clip(255 * np.exp(-((x - c) / 4.0) ** 2) + 60 * np.exp(-((x - ATTN3_BINS + 2) / 3.0) ** 2), 0, 255)
+        ang = step * 0.05 + np.arange(T3) * 0.4
+        h3 = np.stack([np.cos(ang) * (1 + 0.1 * np.arange(T3)), np.sin(ang) * (1 + 0.1 * np.arange(T3)), 0.3 * np.sin(2 * ang)], 1).astype(np.float16)
+        f3 = {"kind": "act3d", "ts": time.time(), "step": step, "T3": T3, "TA": TA, "n_moe": N_MOE, "n_mla": N_MLA, "bins": ATTN3_BINS, "reqs": reqs,
+              "routing3d": base64.b64encode(r3.tobytes()).decode(), "attn3d": base64.b64encode(a3.tobytes()).decode(), "h3": base64.b64encode(h3.tobytes()).decode()}
+        sock.sendto(json.dumps(f3).encode(), (host, int(port)))
         time.sleep(1.0 / hz)
 
 

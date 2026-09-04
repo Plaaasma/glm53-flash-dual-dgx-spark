@@ -69,6 +69,19 @@ def main() -> int:
           "            _viz.record_ribbon(self.layer_idx, x)\n"
           "        return x, residual, post, comb\n",
           "viz-ribbon")
+    # 3c) final hidden state -> 3-D projection (after the ribbon seam)
+    patch(m,
+          "            _viz.end_step()\n            return x, None, None, None\n",
+          "            _viz.record_hidden3d(x)  " + MARK + " viz-h3d\n"
+          "            _viz.end_step()\n            return x, None, None, None\n",
+          "viz-h3d")
+    # 3d) per-request token spans from the model runner (CPU data, every step)
+    patch(V / "v1/worker/gpu/model_runner.py",
+          "        self.step_timing.record_batch(\n            input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL\n        )\n",
+          "        self.step_timing.record_batch(\n            input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL\n        )\n"
+          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-batch\n"
+          "        _viz.set_batch(input_batch)\n",
+          "viz-batch")
     # 4) scheduler snapshot
     s = V / "v1/core/sched/scheduler.py"
     helper = '''
