@@ -149,7 +149,7 @@ footer{padding:26px 0 8px;text-align:center;font:500 10.5px 'IBM Plex Mono',mono
     <div class="sec">
       <div class="cap">throughput</div>
       <div class="bignum">
-        <div class="bn acc"><div class="v mono"><span id="r_gen">—</span><em>tok/s out</em></div><div class="k">generation</div></div>
+        <div class="bn acc"><div class="v mono"><span id="r_gen">—</span><em>tok/s out</em></div><div class="k">generation · <span id="r_genper">—</span> per stream</div></div>
         <div class="bn"><div class="v mono"><span id="r_pp">—</span><em>tok/s in</em></div><div class="k">prefill</div></div>
       </div>
     </div>
@@ -232,6 +232,7 @@ const fmtTok = v => v==null?"—" : v>=1e9?(v/1e9).toFixed(2)+"B" : v>=1e6?(v/1e
 const PANELS = [
  {id:"thru", t:"throughput — tok/s", series:[
    {col:"gen", n:"generate", c:C.acc, w:2, fill:1, band:1},
+   {col:"gen_per", n:"per-stream", c:C.gold, w:1.5, dash:[4,3]},
    {col:"pp",  n:"prefill",  c:C.sky, w:1.5, band:1, axis:"r"}]},
  {id:"spec", t:"speculative decode", series:[
    {col:"accpct", n:"accept %", c:C.teal, w:2, fill:1},
@@ -305,7 +306,10 @@ async function fetchHist(){
   fetching = true;
   try{
     const r = await fetch(`${API}/history?from=${(view.t1-view.span)/1000}&to=${view.t1/1000}&points=520`, {cache:"no-store"});
-    H = await r.json(); drawAll();
+    H = await r.json();
+    // per-stream decode = aggregate generate / running requests, per bucket
+    H.gen_per = (H.t||[]).map((_,i)=> (H.run && H.run[i] > 0 && H.gen && H.gen[i] != null) ? H.gen[i]/H.run[i] : null);
+    drawAll();
   }catch(e){}
   fetching = false;
   if (refetch){ refetch = false; fetchHist(); }
@@ -361,6 +365,7 @@ function renderRail(){
   const r = d.row || {};
   const put = (id,v,f) => $(id).textContent = v==null?"—":f(v);
   put("r_gen", r.gen, v=>v.toFixed(1));
+  $("r_genper").textContent = (r.run > 0 && r.gen != null) ? (r.gen / r.run).toFixed(1) + " tok/s" : "—";
   put("r_pp", r.pp, v=>Math.round(v)+"");
   put("r_acc", r.accpct, v=>v.toFixed(1)+"%");
   put("r_tau", r.tau, v=>v.toFixed(2)+" tok");
