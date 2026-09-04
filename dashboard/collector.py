@@ -410,6 +410,24 @@ def loop():
         time.sleep(max(0.2, TICK - (time.time() - t0)))
 
 # ---------------- API ----------------
+def viz_udp_listener(port=9103):
+    """Receive live-activation frames ('act') and scheduler snapshots ('sched')
+    sent by the engine hooks (glm53_viz_runtime / patch_viz_hooks) as UDP JSON."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+    s.bind(("127.0.0.1", port))
+    while True:
+        try:
+            data, _ = s.recvfrom(65535)
+            f = json.loads(data.decode())
+            k = f.get("kind")
+            if k == "act": state["viz_act"] = f
+            elif k == "sched": state["viz_sched"] = f
+        except Exception:
+            pass
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -424,6 +442,14 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/live":
             self._send(state["live"] or {}); return
+        if u.path == "/viz":
+            # Latest activation frame (from the TP0 worker) and scheduler
+            # snapshot (from the EngineCore), both arriving over UDP :9103.
+            now = time.time()
+            act, sch = state.get("viz_act"), state.get("viz_sched")
+            self._send({"act": act, "act_age": (now - act["ts"]) if act else None,
+                        "sched": sch, "sched_age": (now - sch["ts"]) if sch else None})
+            return
         if u.path == "/totals":
             # Lifetime totals. The raw vLLM counters reset on every engine
             # restart, so instead of differencing them we integrate the per-tick
@@ -489,4 +515,5 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     threading.Thread(target=loop, daemon=True).start()
+    threading.Thread(target=viz_udp_listener, daemon=True, name="viz-udp").start()
     ThreadingHTTPServer(("0.0.0.0", 9102), H).serve_forever()

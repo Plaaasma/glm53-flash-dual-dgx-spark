@@ -132,6 +132,28 @@ canvas.cv{width:100%;height:168px;display:block;cursor:crosshair;touch-action:no
 #tip .th{color:var(--ghost);margin-bottom:5px}
 #tip .tr2{display:flex;justify-content:space-between;gap:16px}
 footer{padding:26px 0 8px;text-align:center;font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost);letter-spacing:.06em}
+/* ================= ambient (live activations) ================= */
+#ambient{margin:18px 0 6px}
+#ambient .ah{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+#ambient .ah h3{font:600 11px 'IBM Plex Mono',monospace;color:var(--mut);letter-spacing:.18em;text-transform:uppercase}
+#ambient .ah .st{font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost)}
+#ambient .ah .st.on{color:var(--acc)}
+#ambient .ah button{margin-left:auto;background:transparent;border:1px solid var(--line2);color:var(--ghost);font:600 10.5px 'IBM Plex Mono',monospace;padding:5px 10px;cursor:pointer;border-radius:3px}
+#ambient .ah button:hover{color:var(--fg)}
+#agrid{display:grid;grid-template-columns:2fr 1fr;gap:14px}
+@media(max-width:1100px){#agrid{grid-template-columns:1fr}}
+.apanel{border:1px solid var(--line);background:var(--ink2);min-width:0}
+.apanel .ph{display:flex;align-items:baseline;gap:12px;padding:9px 12px 8px;border-bottom:1px solid var(--line)}
+.apanel .ph h4{font:600 11px 'IBM Plex Mono',monospace;color:var(--mut);letter-spacing:.14em;text-transform:uppercase}
+.apanel .ph .sub{margin-left:auto;font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost)}
+.apanel canvas{width:100%;display:block}
+#cv_brain{height:300px} #cv_scan{height:300px} #cv_ribbon{height:150px} #cv_kv{height:150px} #cv_gauge{height:150px}
+body.ambient #topbar,body.ambient #rail,body.ambient #charts,body.ambient footer,body.ambient #boot{display:none!important}
+body.ambient #frame{grid-template-columns:1fr}
+body.ambient #main{padding:14px}
+body.ambient #agrid{grid-template-columns:2fr 1fr;grid-auto-rows:minmax(0,1fr);height:calc(100vh - 70px)}
+body.ambient .apanel{display:flex;flex-direction:column}
+body.ambient .apanel canvas{flex:1;height:auto!important;min-height:0}
 </style>
 </head>
 <body>
@@ -210,6 +232,16 @@ footer{padding:26px 0 8px;text-align:center;font:500 10.5px 'IBM Plex Mono',mono
       <div class="bs" id="b_sub"></div>
       <div class="track"><div class="fill" id="b_fill" style="width:0%"></div></div>
       <div class="meta"><span id="b_elapsed"></span><span id="b_pct"></span><span id="b_eta"></span></div>
+    </div>
+    <div id="ambient">
+      <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button id="ambient_btn">AMBIENT ▸</button></div>
+      <div id="agrid">
+        <div class="apanel"><div class="ph"><h4>expert routing — 42 layers × 288 experts</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>attention scan — where each MLA layer reads</h4><span class="sub" id="scan_sub">context →</span></div><canvas id="cv_scan"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>residual stream — per-layer magnitude</h4><span class="sub" id="ribbon_sub">—</span></div><canvas id="cv_ribbon"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>kv pool — 2.1M tokens</h4><span class="sub" id="kv_sub">—</span></div><canvas id="cv_kv"></canvas></div>
+        <div class="apanel" style="grid-column:1 / -1"><div class="ph"><h4>reactor — bandwidth · power · thermals · clocks</h4><span class="sub" id="gauge_sub">—</span></div><canvas id="cv_gauge"></canvas></div>
+      </div>
     </div>
     <div id="charts"></div>
     <footer>spark//console · collector :9102 · agents :9101 · drag pan · wheel zoom · double-click reset</footer>
@@ -584,6 +616,119 @@ function crosshair(p, cv, e){
   tip.style.left=Math.min(innerWidth-tw-12, e.clientX+14)+"px";
   tip.style.top=Math.min(innerHeight-th-12, e.clientY+14)+"px";
 }
+
+/* ---------------- live activations (viz) ---------------- */
+const VIZ = {act:null, sched:null, brain:null, scan:null, rib:[], lastStep:-1, fps:0, frames:0, t0:Date.now(), ambient:false};
+const b64u16 = s => new Uint16Array(Uint8Array.from(atob(s), c=>c.charCodeAt(0)).buffer);
+const b64u8  = s => Uint8Array.from(atob(s), c=>c.charCodeAt(0));
+async function fetchViz(){
+  try{
+    const d = await (await fetch(`${API}/viz`, {cache:"no-store"})).json();
+    const st = $("viz_state");
+    if (d.act && d.act_age < 5){
+      st.textContent = `live · step ${d.act.step} · ${d.act.T} tok/step · ${VIZ.fps.toFixed(0)} fps`; st.className = "st on";
+      if (d.act.step !== VIZ.lastStep){ VIZ.lastStep = d.act.step; VIZ.frames++; ingestAct(d.act); }
+    } else { st.textContent = d.act ? `stale (${d.act_age.toFixed(0)}s)` : "waiting for engine hooks (next restart)"; st.className = "st"; }
+    VIZ.sched = d.sched && d.sched_age < 5 ? d.sched : null;
+  }catch(e){}
+  const el = (Date.now()-VIZ.t0)/1000; if (el > 2){ VIZ.fps = VIZ.frames/el; VIZ.frames = 0; VIZ.t0 = Date.now(); }
+}
+function ingestAct(a){
+  const L = a.n_moe, E = 288, hist = b64u16(a.routing);
+  if (!VIZ.brain || VIZ.brain.length !== L*E) VIZ.brain = new Float32Array(L*E);
+  const B = VIZ.brain, T = Math.max(1, a.T);
+  for (let i=0;i<L*E;i++){ const v = hist[i] / (T*9/E*4); B[i] = Math.max(B[i]*0.82, Math.min(1, v)); }   // decay + normalize
+  const S = b64u8(a.attn), LM = a.n_mla;
+  if (!VIZ.scan || VIZ.scan.length !== LM*256) VIZ.scan = new Float32Array(LM*256);
+  for (let i=0;i<LM*256;i++) VIZ.scan[i] = Math.max(VIZ.scan[i]*0.80, S[i]/255);
+  VIZ.rib.push(a.ribbon.slice(0, a.n_all)); if (VIZ.rib.length > 240) VIZ.rib.shift();
+  VIZ.act = a;
+}
+function cvctx(id){ const cv=$(id); const dpr=devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight; if(!W||!H) return null;
+  if (cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); return {ctx,W,H}; }
+function heat(v){ // ink -> teal -> chartreuse -> white
+  if (v<=0) return "#0e1218"; const t=Math.min(1,v);
+  const r = t<0.5 ? 20+ (t/0.5)*40 : 60+((t-0.5)/0.5)*140, g = 40+t*200, b = t<0.5 ? 60+(t/0.5)*120 : 180-((t-0.5)/0.5)*120;
+  return `rgb(${r|0},${g|0},${b|0})`; }
+function drawBrain(){
+  const c = cvctx("cv_brain"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.brain){ idleText(ctx,W,H,"expert routing appears here once the engine hooks are live"); return; }
+  const L = VIZ.act.n_moe, E = 288, cw = W/E, ch = H/L;
+  for (let l=0;l<L;l++) for (let e=0;e<E;e++){ const v = VIZ.brain[l*E+e]; if (v>0.02){ ctx.fillStyle = heat(v); ctx.fillRect(e*cw, l*ch, Math.max(cw,1), Math.max(ch-0.5,1)); } }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("layer 0", 4, 10); ctx.fillText("layer "+(L-1), 4, H-4);
+  ctx.textAlign="right"; ctx.fillText("expert 287 →", W-4, H-4);
+  // hot experts
+  const load = new Float32Array(E); for (let l=0;l<L;l++) for (let e=0;e<E;e++) load[e]+=VIZ.brain[l*E+e];
+  const top = [...load.keys()].sort((a,b)=>load[b]-load[a]).slice(0,5);
+  $("brain_sub").textContent = "hot: " + top.map(e=>"#"+e).join(" ");
+}
+function drawScan(){
+  const c = cvctx("cv_scan"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.scan){ idleText(ctx,W,H,"attention positions appear here once the engine hooks are live"); return; }
+  const LM = VIZ.act.n_mla, bw = W/256, lh = H/LM;
+  for (let l=0;l<LM;l++){
+    for (let b=0;b<256;b++){ const v = VIZ.scan[l*256+b]; if (v>0.03){ ctx.fillStyle = `rgba(82,183,255,${Math.min(1,0.15+v)})`; ctx.fillRect(b*bw, l*lh+1, Math.max(bw,1), lh-2); } }
+    ctx.fillStyle="#1e242c"; ctx.fillRect(0, l*lh, W, 1);
+  }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("start of context", 4, H-5); ctx.textAlign="right"; ctx.fillText("now", W-4, H-5);
+}
+function drawRibbon(){
+  const c = cvctx("cv_ribbon"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.rib.length){ idleText(ctx,W,H,"residual-stream magnitude per layer appears here once hooks are live"); return; }
+  const N = VIZ.rib[0].length, n = VIZ.rib.length; let mx = 1e-6; for (const r of VIZ.rib) for (const v of r) if (v>mx) mx=v;
+  const cw = W/Math.max(n, 60), lh = H/N;   // stretch until ~5s of history exists
+  for (let i=0;i<n;i++){ const r = VIZ.rib[i], x = W - (n-i)*cw;
+    for (let l=0;l<N;l++){ const v = r[l]/mx; ctx.fillStyle = `rgba(200,245,66,${0.08+0.9*v*v})`; ctx.fillRect(x, l*lh, cw+0.5, lh-0.4); } }
+  const last = VIZ.rib[n-1]; let hi=0; for (let l=0;l<N;l++) if (last[l]>last[hi]) hi=l;
+  $("ribbon_sub").textContent = `peak layer ${hi} · ${last[hi].toFixed(1)}`;
+}
+function drawKV(){
+  const c = cvctx("cv_kv"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  const s = VIZ.sched; const pool = (s && s.pool_tokens) || 2146153;
+  const cols = 128, rows = 12, tiles = cols*rows, tw = W/cols, th = H/rows;
+  const cell = i => [ (i%cols)*tw, Math.floor(i/cols)*th ];
+  for (let i=0;i<tiles;i++){ const [x,y]=cell(i); ctx.fillStyle="#12161c"; ctx.fillRect(x+0.5,y+0.5,tw-1,th-1); }
+  if (!s){ idleText(ctx,W,H,"kv pool map appears here once the scheduler snapshot is live"); return; }
+  const palette=[C.acc,C.sky,C.coral,C.lav,C.gold,C.teal,C.pink,"#9db4ff"]; let cursor=0;
+  (s.reqs||[]).forEach((r,k)=>{ const nt = Math.round(tiles * r.total / pool), done = Math.round(tiles * r.computed / pool), col = palette[k%palette.length];
+    for (let i=0;i<nt && cursor+i<tiles;i++){ const [x,y]=cell(cursor+i); ctx.fillStyle = i<done ? col : col+"55"; ctx.fillRect(x+0.5,y+0.5,tw-1,th-1); }
+    if (r.computed < r.prompt){ const [x,y]=cell(Math.min(tiles-1,cursor+done)); ctx.fillStyle="#fff"; ctx.fillRect(x,y,tw,th); }   // prefill head
+    cursor += nt; });
+  const used = Math.round(tiles*s.usage); for (let i=cursor;i<used && i<tiles;i++){ const [x,y]=cell(i); ctx.fillStyle="#2a323d"; ctx.fillRect(x+0.5,y+0.5,tw-1,th-1); }  // cached / other
+  $("kv_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting`;
+  const kvh = $("cv_kv").parentElement.querySelector("h4"); if (kvh) kvh.textContent = `kv pool — ${(pool/1e6).toFixed(2)}M tokens`;
+}
+function gauge(ctx,x,y,r,v,max,label,unit,color){
+  const a0=Math.PI*0.75, a1=Math.PI*2.25, t=Math.max(0,Math.min(1,v/max));
+  ctx.lineWidth=7; ctx.strokeStyle="#1e242c"; ctx.beginPath(); ctx.arc(x,y,r,a0,a1); ctx.stroke();
+  ctx.strokeStyle=color; ctx.beginPath(); ctx.arc(x,y,r,a0,a0+(a1-a0)*t); ctx.stroke();
+  ctx.fillStyle="#e8ecf1"; ctx.font="600 15px 'IBM Plex Mono'"; ctx.textAlign="center"; ctx.fillText(v==null?"—":(v>=100?v.toFixed(0):v.toFixed(1)), x, y+5);
+  ctx.fillStyle="#8b95a3"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.fillText(unit, x, y+18); ctx.fillStyle="#4a5462"; ctx.fillText(label, x, y+r+16);
+}
+function drawGauges(){
+  const c = cvctx("cv_gauge"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  const r = (LIVE&&LIVE.row)||{}, n=(LIVE&&LIVE.nodes)||{};
+  // bandwidth model: routed experts touched per step + fixed bf16 weights, times steps/s (per rank)
+  const tok = r.stepsz||0, steps = r.steps||0;
+  const distinct = 288*(1-Math.exp(-tok*9/288)), gb = (distinct*0.0063*42 + 7.4 + 0.067*33*Math.max(1,(r.run||1))/8) * steps;
+  const items = [
+    [gb, 273, "memory bandwidth", "GB/s", C.acc], [(r.steps||0), 12, "engine steps", "/s", C.sky],
+    [(n.h&&n.h.gpu.power)||0, 100, "head power", "W", C.gold], [(n.w&&n.w.gpu.power)||0, 100, "worker power", "W", C.gold],
+    [(n.h&&n.h.gpu.temp)||0, 95, "head temp", "°C", C.coral], [(n.w&&n.w.gpu.temp)||0, 95, "worker temp", "°C", C.coral],
+    [(n.h&&n.h.gpu.sm_mhz)||0, 2300, "head clock", "MHz", C.lav], [(n.w&&n.w.gpu.sm_mhz)||0, 2300, "worker clock", "MHz", C.lav],
+  ];
+  const k = items.length, gw = W/k, rad = Math.min(38, H*0.32);
+  items.forEach((it,i)=> gauge(ctx, gw*(i+0.5), H*0.45, rad, it[0], it[1], it[2], it[3], it[4]));
+  $("gauge_sub").textContent = `≈ ${gb.toFixed(0)} GB/s of ${273} peak per rank`;
+}
+function idleText(ctx,W,H,msg){ ctx.fillStyle="#4a5462"; ctx.font="500 11px 'IBM Plex Mono'"; ctx.textAlign="center"; ctx.fillText(msg, W/2, H/2+4); }
+function drawViz(){ drawBrain(); drawScan(); drawRibbon(); drawKV(); drawGauges(); }
+$("ambient_btn").onclick = () => { VIZ.ambient = !VIZ.ambient; document.body.classList.toggle("ambient", VIZ.ambient); $("ambient_btn").textContent = VIZ.ambient ? "◂ EXIT" : "AMBIENT ▸"; drawViz(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape" && VIZ.ambient) $("ambient_btn").click(); });
+if (new URLSearchParams(location.search).get("ambient") === "1") $("ambient_btn").click();
+setInterval(fetchViz, 90);
+(function loop(){ drawViz(); requestAnimationFrame(loop); })();
 
 /* ---------------- loops ---------------- */
 setInterval(()=>{ if(view.live){ view.t1=Date.now(); fetchHist(); } fetchLive(); }, 2500);

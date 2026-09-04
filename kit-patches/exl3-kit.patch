@@ -345,8 +345,136 @@ index 59c8409..e179d44 100644
      P.write_text(text)
      cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")
      print(f"patched {P.name} (mixed prefill policy={cap})")
+diff --git a/overlay/patch_viz_hooks.py b/overlay/patch_viz_hooks.py
+new file mode 100644
+index 0000000..ee3985b
+--- /dev/null
++++ b/overlay/patch_viz_hooks.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""Install live activation telemetry hooks (dashboard 'ambient' panels).
++
++Runtime: /opt/glm53/glm53_viz_runtime.py -> vllm/glm53_viz_runtime.py.
++Hooks (all no-ops unless env GLM53_VIZ=1; graph-safe async copies only):
++  exl3.py apply_exl3_experts      -> record_routing(layer_name, topk_ids)
++  flashinfer_mla_sparse_sm120.py  -> record_attn(layer, topk_indices)
++  glm5next/nvidia/model.py        -> begin_step / record_ribbon / end_step
++  v1/core/sched/scheduler.py      -> rate-limited KV/request snapshot (UDP)
++Idempotent; every anchor must match exactly once or the patcher refuses.
++"""
++import os, shutil, sys
++from pathlib import Path
++V = Path("/usr/local/lib/python3.12/dist-packages/vllm")
++V = Path(os.environ.get("GLM53_VLLM_DIR", str(V)))
++RT_SRC = Path(os.environ.get("GLM53_VIZ_RT_SRC", "/opt/glm53/glm53_viz_runtime.py"))
++MARK = "# [glm53-viz]"
++
++def patch(path: Path, old: str, new: str, label: str) -> None:
++    text = path.read_text()
++    if MARK in text and label in text:
++        print(f"{path.name}: {label} already present — skipping"); return
++    n = text.count(old)
++    if n != 1:
++        raise SystemExit(f"{path}: expected exactly one anchor for {label}, found {n} — refusing")
++    path.write_text(text.replace(old, new, 1)); print(f"patched {path.name}: {label}")
++
++def main() -> int:
++    if RT_SRC.exists():
++        shutil.copyfile(RT_SRC, V / "glm53_viz_runtime.py"); print("installed glm53_viz_runtime.py")
++    # 1) MoE routing
++    patch(V / "model_executor/layers/quantization/exl3.py",
++          "    tokens, hidden = x.shape[-2], x.shape[-1]\n",
++          "    tokens, hidden = x.shape[-2], x.shape[-1]\n"
++          "    from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-routing\n"
++          "    _viz.record_routing(getattr(layer, 'layer_name', id(layer)), topk_ids)\n",
++          "viz-routing")
++    # 2) sparse-MLA attention scan
++    patch(V / "v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py",
++          "        topk_indices = self.topk_indices_buffer[:num_actual_toks]\n",
++          "        topk_indices = self.topk_indices_buffer[:num_actual_toks]\n"
++          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-attn\n"
++          "        _viz.record_attn(getattr(layer, 'layer_name', id(self)), topk_indices)\n",
++          "viz-attn")
++    # 3a) step begin in the base model forward
++    m = V / "models/glm5next/nvidia/model.py"
++    patch(m,
++          "        aux_hidden_states: list[torch.Tensor] = []\n        for idx, layer in enumerate(\n",
++          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-step\n"
++          "        if self.start_layer == 0:\n"
++          "            _viz.begin_step(hidden_states.shape[0], hidden_states.device)\n"
++          "        aux_hidden_states: list[torch.Tensor] = []\n        for idx, layer in enumerate(\n",
++          "viz-step")
++    # 3b) ribbon + end_step in the decoder layer
++    patch(m,
++          "        if self.layer_idx == self.num_hidden_layers - 1:\n"
++          "            x = self.hc_post(x, residual, post, comb)\n"
++          "            x = hc_contract(x, self.n)\n"
++          "            return x, None, None, None\n\n"
++          "        return x, residual, post, comb\n",
++          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-ribbon\n"
++          "        if self.layer_idx == self.num_hidden_layers - 1:\n"
++          "            x = self.hc_post(x, residual, post, comb)\n"
++          "            x = hc_contract(x, self.n)\n"
++          "            _viz.record_ribbon(self.layer_idx, x)\n"
++          "            _viz.end_step()\n"
++          "            return x, None, None, None\n\n"
++          "        if self.layer_idx < self.num_hidden_layers:\n"
++          "            _viz.record_ribbon(self.layer_idx, x)\n"
++          "        return x, residual, post, comb\n",
++          "viz-ribbon")
++    # 4) scheduler snapshot
++    s = V / "v1/core/sched/scheduler.py"
++    helper = '''
++def _glm53_viz_sched(sched, scheduler_output):  ''' + MARK + ''' viz-sched
++    """Rate-limited KV-pool / request snapshot for the dashboard (UDP JSON)."""
++    import os, time, json, socket
++    if os.environ.get("GLM53_VIZ", "0") != "1":
++        return
++    now = time.monotonic()
++    if now - getattr(sched, "_g53_viz_ts", 0.0) < 0.25:
++        return
++    sched._g53_viz_ts = now
++    try:
++        sock = getattr(sched, "_g53_viz_sock", None)
++        if sock is None:
++            sock = sched._g53_viz_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++        host, port = os.environ.get("GLM53_VIZ_UDP", "127.0.0.1:9103").rsplit(":", 1)
++        nb = getattr(sched.cache_config, "num_gpu_blocks", 0) or 0
++        reqs = []
++        sched_tok = scheduler_output.num_scheduled_tokens if scheduler_output is not None else {}
++        for r in list(sched.running)[:64]:
++            reqs.append({"id": r.request_id[-8:], "computed": int(r.num_computed_tokens),
++                         "prompt": int(r.num_prompt_tokens), "total": int(r.num_tokens),
++                         "age": round(time.time() - float(r.arrival_time), 1),
++                         "sched": int(sched_tok.get(r.request_id, 0))})
++        frame = {"kind": "sched", "ts": time.time(), "usage": float(sched.kv_cache_manager.usage),
++                 "pool_tokens": int(nb) * int(getattr(sched, "block_size", 0) or 0),
++                 "waiting": len(sched.waiting), "reqs": reqs}
++        sock.sendto(json.dumps(frame).encode(), (host, int(port)))
++    except Exception:
++        pass
++
++
++'''
++    text = s.read_text()
++    if "viz-sched" not in text:
++        needle = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
++        if text.count(needle) != 1:
++            raise SystemExit(f"{s}: helper insert point not unique")
++        text = text.replace(needle, helper + needle, 1)
++        old = "        return scheduler_output\n"
++        if text.count(old) != 1:
++            raise SystemExit(f"{s}: expected one 'return scheduler_output'")
++        text = text.replace(old, "        _glm53_viz_sched(self, scheduler_output)  " + MARK + "\n" + old, 1)
++        s.write_text(text); print("patched scheduler.py: viz-sched")
++    else:
++        print("scheduler.py: viz-sched already present — skipping")
++    return 0
++
++if __name__ == "__main__":
++    sys.exit(main())
 diff --git a/start.sh b/start.sh
-index f3537c2..89aa3de 100755
+index f3537c2..d55a0f8 100755
 --- a/start.sh
 +++ b/start.sh
 @@ -149,6 +149,7 @@ PORT="${PORT:-8888}"
@@ -357,7 +485,7 @@ index f3537c2..89aa3de 100755
  # dflash (default, incoai/GLM-5.3-Flash-DFlash2, k=7) | mtp | none
  SPEC_METHOD="${SPEC_METHOD:-dflash}"
  DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
-@@ -174,6 +175,11 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
+@@ -174,6 +175,13 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
  DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
  APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
  XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
@@ -366,10 +494,12 @@ index f3537c2..89aa3de 100755
 +DYNSD_PATCH_HOST="${DYNSD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dynamic_sd_cg.py}"
 +KPOOLFG_PATCH_HOST="${KPOOLFG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_finegrained.py}"
 +QUIETLOG_PATCH_HOST="${QUIETLOG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_quiet_iteration_log.py}"
++VIZ_PATCH_HOST="${VIZ_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_viz_hooks.py}"
++VIZ_RT_HOST="${VIZ_RT_HOST:-/home/liam/glm53/nvfp4-vllm/glm53_viz_runtime.py}"
  KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
  KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
  QUANTIZATION="${QUANTIZATION:-exl3}"
-@@ -194,9 +200,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
+@@ -194,9 +202,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
          *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
          *)
              if [ "$SPEC_METHOD" = "dflash" ]; then
@@ -381,16 +511,20 @@ index f3537c2..89aa3de 100755
              fi
              ;;
      esac
-@@ -227,6 +233,8 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
+@@ -227,6 +235,12 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
  # Mixed-step prefill policy when a peer is already decoding (issue #6).
  # skip = do not mix; N>0 = cap tokens; 0 = off.
  GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 +GLM53_NVFP4_KV="${GLM53_NVFP4_KV:-0}"
 +GLM53_NVFP4_SYNCFREE_T="${GLM53_NVFP4_SYNCFREE_T:-192}"
++GLM53_VIZ="${GLM53_VIZ:-0}"
++GLM53_VIZ_RIBBON="${GLM53_VIZ_RIBBON:-1}"
++GLM53_VIZ_UDP="${GLM53_VIZ_UDP:-127.0.0.1:9103}"
++GLM53_VIZ_HZ="${GLM53_VIZ_HZ:-12}"
  # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
  # exceed that without being a true hang. NCCL watchdog is still 600s.
  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
-@@ -861,7 +869,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -861,7 +875,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -407,7 +541,7 @@ index f3537c2..89aa3de 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -899,6 +915,18 @@ fi
+@@ -899,6 +921,21 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -423,10 +557,13 @@ index f3537c2..89aa3de 100755
 +if [ -f /opt/glm53/patch_quiet_iteration_log.py ]; then
 +    python3 /opt/glm53/patch_quiet_iteration_log.py
 +fi
++if [ -f /opt/glm53/patch_viz_hooks.py ]; then
++    python3 /opt/glm53/patch_viz_hooks.py
++fi
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -953,7 +981,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -953,7 +990,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -443,7 +580,7 @@ index f3537c2..89aa3de 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -989,6 +1025,18 @@ fi
+@@ -989,6 +1034,21 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -459,10 +596,13 @@ index f3537c2..89aa3de 100755
 +if [ -f /opt/glm53/patch_quiet_iteration_log.py ]; then
 +    python3 /opt/glm53/patch_quiet_iteration_log.py
 +fi
++if [ -f /opt/glm53/patch_viz_hooks.py ]; then
++    python3 /opt/glm53/patch_viz_hooks.py
++fi
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -1028,6 +1076,11 @@ launch_cluster() {
+@@ -1028,6 +1088,13 @@ launch_cluster() {
      scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
      [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
      scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
@@ -470,20 +610,26 @@ index f3537c2..89aa3de 100755
 +    scp -q -o BatchMode=yes "$DYNSD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dynamic_sd_cg.py"
 +    scp -q -o BatchMode=yes "$KPOOLFG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_finegrained.py"
 +    scp -q -o BatchMode=yes "$QUIETLOG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_quiet_iteration_log.py"
++    scp -q -o BatchMode=yes "$VIZ_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_viz_hooks.py"
++    scp -q -o BatchMode=yes "$VIZ_RT_HOST" "${WORKER_SSH}:/tmp/glm53_viz_runtime.py"
 +    scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
      [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
      scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
  
-@@ -1053,6 +1106,8 @@ launch_cluster() {
+@@ -1053,6 +1120,12 @@ launch_cluster() {
          -e VLLM_CACHE_ROOT=/root/.cache/vllm
          -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
          -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
 +        -e "GLM53_NVFP4_KV=$GLM53_NVFP4_KV"
 +        -e "GLM53_NVFP4_SYNCFREE_T=$GLM53_NVFP4_SYNCFREE_T"
++        -e "GLM53_VIZ=$GLM53_VIZ"
++        -e "GLM53_VIZ_RIBBON=$GLM53_VIZ_RIBBON"
++        -e "GLM53_VIZ_UDP=$GLM53_VIZ_UDP"
++        -e "GLM53_VIZ_HZ=$GLM53_VIZ_HZ"
          -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
          -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
          -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
-@@ -1093,7 +1148,7 @@ launch_cluster() {
+@@ -1093,10 +1166,11 @@ launch_cluster() {
      local v
      for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
               MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
@@ -492,7 +638,11 @@ index f3537c2..89aa3de 100755
               DFLASH_DRAFT_TP \
               LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
               LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED MODEL_DIR EXTRA_ARGS \
-@@ -1124,6 +1179,11 @@ launch_cluster() {
++             GLM53_VIZ GLM53_VIZ_RIBBON GLM53_VIZ_UDP GLM53_VIZ_HZ \
+              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
+         serve_env+=" -e $v='${!v:-}'"
+     done
+@@ -1124,6 +1198,13 @@ launch_cluster() {
          -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
          -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
          -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
@@ -500,11 +650,13 @@ index f3537c2..89aa3de 100755
 +        -v '/tmp/patch_dynamic_sd_cg.py:/opt/glm53/patch_dynamic_sd_cg.py:ro' \
 +        -v '/tmp/patch_kpool_tail_finegrained.py:/opt/glm53/patch_kpool_tail_finegrained.py:ro' \
 +        -v '/tmp/patch_quiet_iteration_log.py:/opt/glm53/patch_quiet_iteration_log.py:ro' \
++        -v '/tmp/patch_viz_hooks.py:/opt/glm53/patch_viz_hooks.py:ro' \
++        -v '/tmp/glm53_viz_runtime.py:/opt/glm53/glm53_viz_runtime.py:ro' \
 +        -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
          -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
          -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
          -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
-@@ -1155,6 +1215,11 @@ launch_cluster() {
+@@ -1155,6 +1236,13 @@ launch_cluster() {
          -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
          -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
          -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
@@ -512,11 +664,13 @@ index f3537c2..89aa3de 100755
 +        -v "$DYNSD_PATCH_HOST:/opt/glm53/patch_dynamic_sd_cg.py:ro" \
 +        -v "$KPOOLFG_PATCH_HOST:/opt/glm53/patch_kpool_tail_finegrained.py:ro" \
 +        -v "$QUIETLOG_PATCH_HOST:/opt/glm53/patch_quiet_iteration_log.py:ro" \
++        -v "$VIZ_PATCH_HOST:/opt/glm53/patch_viz_hooks.py:ro" \
++        -v "$VIZ_RT_HOST:/opt/glm53/glm53_viz_runtime.py:ro" \
 +        -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
          -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
          -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
          -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
-@@ -1175,6 +1240,7 @@ launch_cluster() {
+@@ -1175,6 +1263,7 @@ launch_cluster() {
          -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
          -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" -e MTP_TOKENS="$MTP_TOKENS" \
          -e SPEC_METHOD="$SPEC_METHOD" \
