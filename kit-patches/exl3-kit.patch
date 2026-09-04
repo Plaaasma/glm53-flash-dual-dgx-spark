@@ -1,5 +1,5 @@
 diff --git a/overlay/patch_scheduler_decode_floor.py b/overlay/patch_scheduler_decode_floor.py
-index 59c8409..879b65f 100644
+index 59c8409..e179d44 100644
 --- a/overlay/patch_scheduler_decode_floor.py
 +++ b/overlay/patch_scheduler_decode_floor.py
 @@ -44,6 +44,30 @@ def _glm53_mixed_prefill_policy(running, current):
@@ -33,8 +33,106 @@ index 59c8409..879b65f 100644
      if raw in ("skip", "-1"):
          cap = 0
      else:
+@@ -107,6 +131,56 @@ WAITING_NEW = """                    threshold = self.scheduler_config.long_pref
+ """
+ 
+ 
++DBG_CAP_OLD = """            mixed_cap = _glm53_mixed_prefill_policy(self.running, request)  # [glm53-decode-floor]
++            if mixed_cap is not None and request.num_computed_tokens < request.num_prompt_tokens:
++                num_new_tokens = min(num_new_tokens, mixed_cap)
++"""
++
++DBG_CAP_NEW = """            _g53_pre = num_new_tokens  # [glm53-decode-floor] dbg
++            mixed_cap = _glm53_mixed_prefill_policy(self.running, request)  # [glm53-decode-floor]
++            if mixed_cap is not None and request.num_computed_tokens < request.num_prompt_tokens:
++                num_new_tokens = min(num_new_tokens, mixed_cap)
++            _g53_post_cap = num_new_tokens  # [glm53-decode-floor] dbg
++            if request.num_computed_tokens < request.num_prompt_tokens:  # [glm53-decode-floor] dbg
++                import time as _g53t2
++                if _g53t2.monotonic() - getattr(self, "_g53_dbg2_ts", 0.0) > 1.0:
++                    self._g53_dbg2_ts = _g53t2.monotonic()
++                    logger.info(
++                        "[glm53-dbg] prefill pass: req=%s pre=%s cap=%s post=%s computed=%d"
++                        " prompt=%d ntws=%d placeholders=%d budget=%s",
++                        request.request_id, _g53_pre, mixed_cap, _g53_post_cap,
++                        request.num_computed_tokens, request.num_prompt_tokens,
++                        request.num_tokens_with_spec, request.num_output_placeholders,
++                        token_budget,
++                    )
++"""
++
++ZERO_OLD = """                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
++                # we do not strictly follow the FCFS scheduling policy and
++                # allow the lower-priority requests to be scheduled.
++                req_index += 1
++                continue
++"""
++
++ZERO_NEW = """                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
++                # we do not strictly follow the FCFS scheduling policy and
++                # allow the lower-priority requests to be scheduled.
++                if request.num_computed_tokens < request.num_prompt_tokens:  # [glm53-decode-floor] dbg
++                    import time as _g53t
++                    if _g53t.monotonic() - getattr(self, "_g53_dbg_ts", 0.0) > 1.0:
++                        self._g53_dbg_ts = _g53t.monotonic()
++                        logger.info(
++                            "[glm53-dbg] prefill got 0 tokens: req=%s pre_min=%s post_cap=%s"
++                            " mixed_cap=%s computed=%d prompt=%d token_budget=%s",
++                            request.request_id, _g53_pre, _g53_post_cap, mixed_cap,
++                            request.num_computed_tokens, request.num_prompt_tokens,
++                            token_budget,
++                        )
++                req_index += 1
++                continue
++"""
++
++
+ def replace_once(text: str, old: str, new: str, label: str) -> str:
+     n = text.count(old)
+     if n != 1:
+@@ -118,18 +192,28 @@ def main() -> int:
+     if not P.is_file():
+         raise SystemExit(f"missing {P}")
+     text = P.read_text()
+-    if MARK in text:
+-        print(f"{P.name}: {MARK} already present — skipping")
+-        return 0
+-    if "import os\n" not in text.split("import time\n", 1)[0]:
+-        text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import os")
+-    if "def _glm53_mixed_prefill_policy(" not in text:
+-        needle = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
+-        if text.count(needle) != 1:
+-            raise SystemExit(f"{P}: helper insert point not unique")
+-        text = text.replace(needle, HELPER + needle, 1)
+-    text = replace_once(text, RUNNING_OLD, RUNNING_NEW, "running-prefill")
+-    text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
++    if MARK not in text:
++        if "import os\n" not in text.split("import time\n", 1)[0]:
++            text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import os")
++        if "def _glm53_mixed_prefill_policy(" not in text:
++            needle = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
++            if text.count(needle) != 1:
++                raise SystemExit(f"{P}: helper insert point not unique")
++            text = text.replace(needle, HELPER + needle, 1)
++        text = replace_once(text, RUNNING_OLD, RUNNING_NEW, "running-prefill")
++        text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
++    else:
++        print(f"{P.name}: {MARK} present — core seams kept")
++    if "prefill pass" not in text:
++        if "[glm53-decode-floor] dbg" in text:
++            # v2 dbg seams present: upgrade the cap-capture block in place
++            v2 = DBG_CAP_NEW.split("            if request.num_computed_tokens < request.num_prompt_tokens:  # [glm53-decode-floor] dbg")[0]
++            text = replace_once(text, v2, DBG_CAP_NEW, "dbg-cap-upgrade")
++        else:
++            text = replace_once(text, DBG_CAP_OLD, DBG_CAP_NEW, "dbg-cap-capture")
++            text = replace_once(text, ZERO_OLD, ZERO_NEW, "zero-sched-dbg")
++    else:
++        print(f"{P.name}: dbg seams current")
+     P.write_text(text)
+     cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")
+     print(f"patched {P.name} (mixed prefill policy={cap})")
 diff --git a/start.sh b/start.sh
-index f3537c2..7a7b89a 100755
+index f3537c2..3a8bc2e 100755
 --- a/start.sh
 +++ b/start.sh
 @@ -174,6 +174,8 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
