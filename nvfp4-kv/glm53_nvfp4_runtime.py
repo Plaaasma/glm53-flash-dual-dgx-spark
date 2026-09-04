@@ -91,7 +91,7 @@ def _gather_kernel(pool_ptr, idx_ptr, out_u8_ptr, out_f32_ptr, S,
     if row >= S:
         return
     src = tl.load(idx_ptr + row).to(tl.int64)
-    src = tl.maximum(src, 0)
+    src = tl.maximum(src, 0)  # -1-padded table entries: gather row 0, consumer masks them
     b = tl.arange(0, HALF)
     byts = tl.load(pool_ptr + src * 288 + b).to(tl.int32)
     lo_c = byts & 0xF
@@ -127,14 +127,28 @@ def _gather(pool: torch.Tensor, idx: torch.Tensor, out: torch.Tensor) -> None:
     _gather_kernel[(S,)](pool, idx, out, f32, S, HALF=256, num_warps=4)
 
 
+# Sync-free ceiling: the largest step that must stay host-sync-free. Mixed
+# steps (the c16 + long-prefill case) are capped by design at 128 prefill
+# tokens (GLM53_MIXED_PREFILL_CHUNK) + 16 seqs x 4 spec slots (MTP-3) = 192.
+# 87 host round-trips per step (45 MLA unique/alloc syncs + 42 MoE .item()
+# syncs) measured 830 ms/step under concurrent load, 2026-09-03; keeping
+# every mixed step below this cap keeps the whole step launch-and-forget.
+_SYNC_FREE_T = int(os.environ.get("GLM53_NVFP4_SYNCFREE_T", "192"))
+
+
 def build_scratch(kv_cache: torch.Tensor, block_tables: torch.Tensor):
     """kv_cache: allocated pool (any shape, 288 B/token rows).
     block_tables: [T, 1, K] int32 physical token rows (-1 padded).
     Returns (scratch [S,656] uint8, tables [T,1,K] into scratch).
 
-    T <= 64 (decode, CUDA-graph captured): fixed shapes, no host syncs --
-    gathers all T*K rows into a persistent per-shape buffer, tables = arange.
-    T > 64 (prefill, eager): torch.unique dedup, gather the union once.
+    T <= _SYNC_FREE_T (decode and mixed decode+prefill steps; <=64 also
+    CUDA-graph captured): fixed shapes, no host syncs -- gathers all T*K
+    rows (no dedup; duplicate rows cost bandwidth, ~37 ms/step worst case,
+    which is noise next to the ~830 ms/step the host syncs cost) into one
+    shared persistent buffer sized for the cap; tables = arange slice.
+    T > _SYNC_FREE_T (pure-prefill chunks, eager): torch.unique dedup --
+    there the union is ~context-sized, far smaller than T*K, and prefill
+    is eager and latency-tolerant anyway.
     """
     pool = kv_cache.view(-1, NV_BYTES)
     T, one, K = block_tables.shape
@@ -143,18 +157,19 @@ def build_scratch(kv_cache: torch.Tensor, block_tables: torch.Tensor):
     # The flashinfer wrapper routes decode-vs-paged partly on the cache's page
     # geometry: page_size must be 64 (like the real pool) or <=64-token steps
     # get sent to the paged kernel, which rejects them. Emit [P, 64, 656].
-    if T <= 64:
+    if T <= _SYNC_FREE_T:
         S = T * K
         P = (S + 63) // 64
-        key = ("d", S, dev.index)
+        key = ("shared", K, dev.index)
         ent = _bufs.get(key)
         if ent is None:
-            ent = (torch.zeros(P, 64, DS_BYTES, dtype=torch.uint8, device=dev),
-                   torch.arange(S, dtype=torch.int32, device=dev).view(T, 1, K))
+            pcap = (_SYNC_FREE_T * K + 63) // 64
+            ent = (torch.zeros(pcap, 64, DS_BYTES, dtype=torch.uint8, device=dev),
+                   torch.arange(pcap * 64, dtype=torch.int32, device=dev))
             _bufs[key] = ent
-        scratch, tables = ent
-        _gather(pool, flat, scratch.view(-1, DS_BYTES)[:S])
-        return scratch, tables
+        buf, ar = ent
+        _gather(pool, flat, buf.view(-1, DS_BYTES)[:S])
+        return buf[:P], ar[:S].view(T, 1, K)
     uniq, inv = torch.unique(flat, return_inverse=True)
     S = uniq.shape[0]
     P = (S + 63) // 64
