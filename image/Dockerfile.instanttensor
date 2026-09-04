@@ -1,0 +1,19 @@
+# Adds the InstantTensor weight loader (io_uring Direct I/O safetensors
+# streaming) on top of the locally built GLM-5.3-Flash sm121 image.
+#
+#   docker build -f image/Dockerfile.instanttensor \
+#       --build-arg BASE=glm53-flash-sm121:local-0831 \
+#       -t glm53-flash-sm121:local-0904-it .
+#   docker save glm53-flash-sm121:local-0904-it | ssh <worker> docker load
+#
+# Why source build: instanttensor ships no aarch64 wheel; the C++ extension
+# compiles in ~2 min against the image's CUDA 13 toolchain. Its dependency
+# resolution downgrades nvidia-nccl-cu13 to 2.29.7, which is NOT the NCCL
+# the kit was validated with (2.30.7, needed for the CX7 RoCE path), so it
+# is pinned back afterwards.
+ARG BASE=glm53-flash-sm121:local-0831
+FROM ${BASE}
+RUN pip install --no-build-isolation instanttensor==0.1.9 \
+ && pip install --no-deps nvidia-nccl-cu13==2.30.7 \
+ && python3 -c "import instanttensor" \
+ && pip show nvidia-nccl-cu13 | grep -q "Version: 2.30.7"

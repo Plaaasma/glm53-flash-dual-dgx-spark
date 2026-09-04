@@ -36,6 +36,7 @@ class _State:
         self.moe_ord: dict = {}     # layer identity -> ordinal (first-call order)
         self.mla_ord: dict = {}
         self.rank = -1
+        self.capture_seen = 0.0     # last time a hook ran inside a CUDA graph capture
 
     def init(self, device: torch.device):
         if self.ready:
@@ -44,14 +45,32 @@ class _State:
             if self.ready:
                 return
             self.dev = device
+            # vLLM runs the forward under torch.inference_mode(); tensors created
+            # there are "inference tensors" that no other context may update
+            # in place (the publisher thread hit exactly that). Allocate as
+            # normal tensors: in-graph updates from inference mode stay legal.
+            self._im = torch.inference_mode(False); self._im.__enter__()
+            # Hooks record into DEVICE buffers only (device->device copies are
+            # always graph-capturable; host-pinned copies are rejected by this
+            # fork's piecewise capture). The publisher pulls them to the host
+            # on its own stream, outside any capture.
+            dz = lambda *s, dt=torch.int32: torch.zeros(*s, dtype=dt, device=device)
+            self.d_routing = dz(N_MOE, MAX_T, TOPK)
+            self.d_attn = dz(N_MLA, MAX_T, TOPK_ATTN)
+            self.d_ribbon = dz(N_ALL, dt=torch.float32)
+            self.d_meta = dz(4)                        # [step, T, -, -]
+            self.d_one = torch.ones(1, dtype=torch.int32, device=device)
             pin = lambda *s, dt=torch.int32: torch.zeros(*s, dtype=dt, pin_memory=True)
             self.h_routing = pin(N_MOE, MAX_T, TOPK)
             self.h_attn = pin(N_MLA, MAX_T, TOPK_ATTN)
             self.h_ribbon = pin(N_ALL, dt=torch.float32)
-            self.h_meta = pin(4)                       # [step, T, n_moe_seen, n_mla_seen]
-            self.d_ribbon = torch.zeros(N_ALL, dtype=torch.float32, device=device)
-            self.d_meta = torch.zeros(4, dtype=torch.int32, device=device)
-            self.d_one = torch.ones(1, dtype=torch.int32, device=device)
+            self.h_meta = pin(4)
+            for nm in ("h_routing", "h_attn", "h_ribbon", "h_meta"):
+                b = getattr(self, nm)
+                if not b.is_pinned():
+                    setattr(self, nm, b.pin_memory())
+            self.pub_stream = torch.cuda.Stream(device=device)
+            self._im.__exit__(None, None, None); del self._im
             self.ready = True
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
@@ -74,50 +93,83 @@ def _ordinal(table: dict, key, limit: int) -> int:
 
 
 # ---------------------------------------------------------------- hooks ----
+_DEAD = False
+
+
+_DEAD_REASON = ""
+
+
+def _disarm(where: str, exc: BaseException) -> None:
+    global _DEAD, _DEAD_REASON
+    if not _DEAD:
+        _DEAD = True
+        _DEAD_REASON = f"{where}: {str(exc)[:160]}"
+        try:
+            from vllm.logger import init_logger
+            init_logger("vllm.glm53_viz").warning("viz telemetry disabled after %s failed: %s", where, exc)
+        except Exception:
+            pass
+
+
 def begin_step(num_tokens: int, device: torch.device) -> None:
     """Call once at the top of the model forward (captured into the graph)."""
-    if not _ON:
+    if not _ON or _DEAD:
         return
-    S.init(device)
-    S.d_meta[0].add_(S.d_one[0])          # step counter (device-side, graph-safe)
-    S.d_meta[1].fill_(min(num_tokens, MAX_T))
+    try:
+        if torch.cuda.is_current_stream_capturing():
+            S.capture_seen = time.time()            # publisher must stay off the GPU while captures run
+            if not S.ready:
+                return                              # never allocate inside a capture; arm on the next eager step
+        S.init(device)
+        S.d_meta[0].add_(S.d_one[0])          # step counter (device-side, graph-safe)
+        S.d_meta[1].fill_(min(num_tokens, MAX_T))
+    except Exception as e:
+        _disarm("begin_step", e)
 
 
 def record_routing(layer_key, topk_ids: torch.Tensor) -> None:
     """topk_ids: [T, K] int on device. Async copy into the pinned slot."""
-    if not _ON or not S.ready:
+    if not _ON or _DEAD or not S.ready:
         return
-    o = _ordinal(S.moe_ord, layer_key, N_MOE)
-    if o < 0:
-        return
-    t = min(topk_ids.shape[0], MAX_T)
-    S.h_routing[o, :t, : topk_ids.shape[1]].copy_(topk_ids[:t].to(torch.int32), non_blocking=True)
+    try:
+        if torch.cuda.is_current_stream_capturing():
+            S.capture_seen = time.time()            # drafter captures reach here without begin_step
+        o = _ordinal(S.moe_ord, layer_key, N_MOE)
+        if o < 0:
+            return
+        t = min(topk_ids.shape[0], MAX_T)
+        S.d_routing[o, :t, : topk_ids.shape[1]].copy_(topk_ids[:t])
+    except Exception as e:
+        _disarm("record_routing", e)
 
 
 def record_attn(layer_key, topk_indices: torch.Tensor) -> None:
     """topk_indices: [T, 2048] int32 logical positions (-1 padded)."""
-    if not _ON or not S.ready:
+    if not _ON or _DEAD or not S.ready:
         return
-    o = _ordinal(S.mla_ord, layer_key, N_MLA)
-    if o < 0:
-        return
-    t = min(topk_indices.shape[0], MAX_T)
-    S.h_attn[o, :t, : topk_indices.shape[1]].copy_(topk_indices[:t], non_blocking=True)
+    try:
+        o = _ordinal(S.mla_ord, layer_key, N_MLA)
+        if o < 0:
+            return
+        t = min(topk_indices.shape[0], MAX_T)
+        S.d_attn[o, :t, : topk_indices.shape[1]].copy_(topk_indices[:t])
+    except Exception as e:
+        _disarm("record_attn", e)
 
 
 def record_ribbon(layer_idx: int, hidden: torch.Tensor) -> None:
     """Mean residual-stream L2 norm for one layer (3 tiny kernels)."""
-    if not _ON or not _RIBBON or not S.ready or layer_idx >= N_ALL:
+    if not _ON or _DEAD or not _RIBBON or not S.ready or layer_idx >= N_ALL:
         return
-    S.d_ribbon[layer_idx].copy_(hidden.detach().float().norm(dim=-1).mean())
+    try:
+        S.d_ribbon[layer_idx].copy_(hidden.detach().float().norm(dim=-1).mean())
+    except Exception as e:
+        _disarm("record_ribbon", e)
 
 
 def end_step() -> None:
-    """Enqueue the small device->pinned copies for the scalar buffers."""
-    if not _ON or not S.ready:
-        return
-    S.h_ribbon.copy_(S.d_ribbon, non_blocking=True)
-    S.h_meta.copy_(S.d_meta, non_blocking=True)
+    """Nothing to enqueue: all recording is device-side; the publisher pulls."""
+    return
 
 
 # ------------------------------------------------------------ publisher ----
@@ -155,18 +207,43 @@ def _publisher(state: _State) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     last = -1
     period = 1.0 / _HZ
+    hb = 0.0
+    errs = 0; last_err = ""; last_meta = None
     while True:
         time.sleep(period)
-        try:
+        now = time.time()
+        if now - hb > 2.0:
+            hb = now
+            try:
+                st = {"kind": "viz_status", "ts": now, "ready": state.ready, "dead": _DEAD, "reason": _DEAD_REASON,
+                      "rank": state.rank, "n_moe": len(state.moe_ord), "n_mla": len(state.mla_ord), "last_step": last,
+                      "errors": errs, "last_error": last_err, "meta": last_meta}
+                sock.sendto(json.dumps(st).encode(), (host, int(port)))
+            except Exception:
+                pass
+        if now - state.capture_seen < 3.0:
+            continue                                # a CUDA graph capture is (or just was) in progress: any
+        try:                                        # sync/copy from this thread would invalidate it (global mode)
+          with torch.inference_mode():
+            with torch.cuda.stream(state.pub_stream):
+                state.h_meta.copy_(state.d_meta, non_blocking=True)
+            state.pub_stream.synchronize()
             step = int(state.h_meta[0]); T = int(state.h_meta[1])
+            last_meta = [step, T]
             if step == last or T <= 0:
                 continue
             last = step
-            frame = _fold(state, T, len(state.moe_ord), len(state.mla_ord))
-            frame["step"] = step
-            sock.sendto(json.dumps(frame).encode(), (host, int(port)))
-        except Exception:
-            pass
+            n_moe, n_mla = min(len(state.moe_ord), N_MOE), min(len(state.mla_ord), N_MLA)
+            with torch.cuda.stream(state.pub_stream):
+                state.h_routing[:n_moe, :T].copy_(state.d_routing[:n_moe, :T], non_blocking=True)
+                state.h_attn[:n_mla, :T].copy_(state.d_attn[:n_mla, :T], non_blocking=True)
+                state.h_ribbon.copy_(state.d_ribbon, non_blocking=True)
+            state.pub_stream.synchronize()
+            frame = _fold(state, T, n_moe, n_mla)
+          frame["step"] = step
+          sock.sendto(json.dumps(frame).encode(), (host, int(port)))
+        except Exception as e:
+            errs += 1; last_err = f"{type(e).__name__}: {str(e)[:140]}"
 
 
 # ----------------------------------------------------------- self-test ----

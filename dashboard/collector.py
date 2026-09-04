@@ -217,6 +217,9 @@ def _fill_vllm(p, now, row, slot):
         "iter_cnt": psum(p, "vllm:iteration_tokens_total_count"),
         "cached": psum(p, "vllm:prompt_tokens_cached_total"),
         "flops": psum(p, "vllm:estimated_flops_per_gpu_total"),
+        # per-step context (prefill) tokens from the glm53 logger patch: counted
+        # every engine step, including pure-prefill steps that produce no output
+        "ctx_live": psum(p, "vllm:glm53_ctx_tokens_total"),
         "t": now,
     }
     kv = pget(p, "vllm:kv_cache_usage_perc")
@@ -260,7 +263,11 @@ def _fill_vllm(p, now, row, slot):
         dRej = max(0.0, dD - dA)
         pp_live = (dIt - max(0.0, cur["gen"] - pv["gen"]) - dRej) / dt
         dPrompt = max(0.0, cur["pp"] - pv["pp"])
-        row["pp"] = max(pp_live, 0.0) if dIt > 0 else dPrompt / dt
+        dCtx = cur.get("ctx_live", 0) - pv.get("ctx_live", 0)
+        if cur.get("ctx_live", 0) > 0:
+            row["pp"] = max(dCtx, 0.0) / dt        # live: every step counted, no output needed
+        else:
+            row["pp"] = max(pp_live, 0.0) if dIt > 0 else dPrompt / dt
         dC = max(0.0, cur.get("iter_cnt", 0) - pv.get("iter_cnt", 0))
         row["steps"] = dC / dt
         row["stepsz"] = dIt / dC if dC > 0 else None
@@ -424,6 +431,7 @@ def viz_udp_listener(port=9103):
             k = f.get("kind")
             if k == "act": state["viz_act"] = f
             elif k == "sched": state["viz_sched"] = f
+            elif k == "viz_status": state["viz_status"] = f
         except Exception:
             pass
 
@@ -447,8 +455,10 @@ class H(BaseHTTPRequestHandler):
             # snapshot (from the EngineCore), both arriving over UDP :9103.
             now = time.time()
             act, sch = state.get("viz_act"), state.get("viz_sched")
+            vs = state.get("viz_status")
             self._send({"act": act, "act_age": (now - act["ts"]) if act else None,
-                        "sched": sch, "sched_age": (now - sch["ts"]) if sch else None})
+                        "sched": sch, "sched_age": (now - sch["ts"]) if sch else None,
+                        "status": vs, "status_age": (now - vs["ts"]) if vs else None})
             return
         if u.path == "/totals":
             # Lifetime totals. The raw vLLM counters reset on every engine

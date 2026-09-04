@@ -628,7 +628,11 @@ async function fetchViz(){
     if (d.act && d.act_age < 5){
       st.textContent = `live · step ${d.act.step} · ${d.act.T} tok/step · ${VIZ.fps.toFixed(0)} fps`; st.className = "st on";
       if (d.act.step !== VIZ.lastStep){ VIZ.lastStep = d.act.step; VIZ.frames++; ingestAct(d.act); }
-    } else { st.textContent = d.act ? `stale (${d.act_age.toFixed(0)}s)` : "waiting for engine hooks (next restart)"; st.className = "st"; }
+    } else {
+      const s = d.status && d.status_age < 6 ? d.status : null;
+      st.textContent = s ? (s.dead ? `hooks disabled — ${s.reason}` : `hooks armed (rank ${s.rank}, ${s.n_moe} moe / ${s.n_mla} mla, step ${s.last_step}${s.meta ? ", meta " + s.meta.join("/") : ""}${s.errors ? ", " + s.errors + " errors: " + s.last_error : ""}) — waiting for frames`)
+                         : (d.act ? `stale (${d.act_age.toFixed(0)}s)` : "waiting for engine hooks (next restart)");
+      st.className = "st"; }
     VIZ.sched = d.sched && d.sched_age < 5 ? d.sched : null;
   }catch(e){}
   const el = (Date.now()-VIZ.t0)/1000; if (el > 2){ VIZ.fps = VIZ.frames/el; VIZ.frames = 0; VIZ.t0 = Date.now(); }

@@ -1,0 +1,14 @@
+#!/bin/bash
+# glm53-reclaim <container> <GiB>: push cold pages of a container to zram via
+# cgroup v2 memory.reclaim. A slow mmap weight load did this incidentally
+# (page-cache pressure); the 35 s InstantTensor load does not, so graph
+# capture ran ~3 GiB short of headroom on 121 GiB unified memory.
+set -u
+c="${1:?container}"; n="${2:?GiB}"
+id=$(docker inspect --format '{{.Id}}' "$c") || exit 2
+f="/sys/fs/cgroup/system.slice/docker-${id}.scope/memory.reclaim"
+[ -w "$f" ] || { echo "no writable memory.reclaim for $c" >&2; exit 2; }
+before=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo); t0=$(date +%s.%N)
+echo "${n}G" > "$f" 2>/dev/null    # EAGAIN when the full amount is not reclaimable; partial is fine
+after=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+printf 'reclaim %s %sG: MemAvailable %d -> %d MiB (+%d) in %.1fs, swap used %s MiB\n' "$c" "$n" "$before" "$after" "$((after-before))" "$(echo "$(date +%s.%N) - $t0" | bc)" "$(free -m | awk '/Swap/{print $3}')"

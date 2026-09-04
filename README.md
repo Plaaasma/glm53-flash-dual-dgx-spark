@@ -60,6 +60,40 @@ What it does and why (each of these was learned from a real failure):
 
 **None of this survives a reboot.** Re-run the script after every reboot.
 
+### 1.5 Optional: fast boots (InstantTensor + post-load reclaim)
+
+The stock loader mmaps the safetensors and reads them at ~150–300 MB/s: 259 s
+for 164 GB. [InstantTensor](https://pypi.org/project/instanttensor/) streams
+them with Direct I/O at 4.7–5.6 GB/s: 35 s. Launch-to-API drops from ~9 min
+to ~4.5 min. Two pieces, both nodes:
+
+1. Build the image (source build, no aarch64 wheel; ~2 min) and copy it to
+   the worker:
+
+   ```bash
+   docker build -f image/Dockerfile.instanttensor \
+       --build-arg BASE=glm53-flash-sm121:local-0831 -t glm53-flash-sm121:local-0904-it .
+   docker save glm53-flash-sm121:local-0904-it | ssh <worker> docker load
+   ```
+
+2. Install the reclaim helper (root-owned) and its sudoers entry:
+
+   ```bash
+   sudo install -o root -g root -m 0755 host-setup/glm53-reclaim /usr/local/sbin/glm53-reclaim
+   echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/glm53-reclaim" | sudo tee /etc/sudoers.d/glm53-reclaim
+   sudo chmod 0440 /etc/sudoers.d/glm53-reclaim
+   ```
+
+Why the helper: on 121 GiB unified memory the 4-minute mmap load *incidentally*
+pushes ~3–5 GiB of the serving processes' cold pages to zram through page-cache
+pressure, and graph capture relies on that headroom. The 35 s load applies no
+pressure, nothing gets swapped, and capture trips the memory watchdog (we lost
+six boots to this before measuring swap). The helper writes the container
+cgroup's `memory.reclaim`; `start.sh` calls it right after weights load
+(`GLM53_POSTLOAD_RECLAIM=4`) and again once the API is up
+(`GLM53_POSTREADY_RECLAIM=3`). `env.example` enables all of it; set
+`--load-format` back to `auto` and the reclaim knobs to 0 to use the stock loader.
+
 ## 2. Get the kit and apply the patches
 
 ```bash
