@@ -1,0 +1,15 @@
+tokens 2044 x top8 over 96 experts: rows/expert min 72 mean 170 max 865; experts >192 rows: 20
+correctness (skewed, id order): max rel diff 3.4e-04
+
+path                                          ms/layer  TFLOPS
+upstream fused, all experts (big temps)         186.07     4.4
+vLLM today: fused<=192 + reconstruct/cuBLAS fat    163.41     5.0
+M-tiled v5, expert id order                      94.07     8.7
+M-tiled v0 m16_k32_n256 (upstream shape)    id-order   187.80 ms   largest-first   165.45 ms
+M-tiled v1 m32_k32_n256                     id-order   145.87 ms   largest-first   144.73 ms
+M-tiled v2 m64_k32_n128                     id-order   142.09 ms   largest-first   122.13 ms
+M-tiled v3 m64_k32_n256                     id-order   209.96 ms   largest-first   189.95 ms
+M-tiled v4 m128_k16_n128                    id-order   148.61 ms   largest-first   133.21 ms
+M-tiled v5 m64_k16_n256                     id-order    87.62 ms   largest-first    84.79 ms
+upstream fused                              id-order   178.44 ms   largest-first   165.53 ms
+footprint: reserved 1562 MiB

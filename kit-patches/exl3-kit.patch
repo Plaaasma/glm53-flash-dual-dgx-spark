@@ -641,7 +641,7 @@ index 0000000..f9917cc
 +if __name__ == "__main__":
 +    sys.exit(main())
 diff --git a/start.sh b/start.sh
-index f3537c2..ef97f40 100755
+index f3537c2..49bdd00 100755
 --- a/start.sh
 +++ b/start.sh
 @@ -149,6 +149,7 @@ PORT="${PORT:-8888}"
@@ -652,7 +652,7 @@ index f3537c2..ef97f40 100755
  # dflash (default, incoai/GLM-5.3-Flash-DFlash2, k=7) | mtp | none
  SPEC_METHOD="${SPEC_METHOD:-dflash}"
  DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
-@@ -174,6 +175,17 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
+@@ -174,6 +175,19 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
  DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
  APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
  XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
@@ -667,10 +667,12 @@ index f3537c2..ef97f40 100755
 +ITLOCAL_PATCH_HOST="${ITLOCAL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_instanttensor_local.py}"
 +LOADDIAG_PATCH_HOST="${LOADDIAG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_diag.py}"
 +LOADREL_PATCH_HOST="${LOADREL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_release.py}"
++EXL3MT_PATCH_HOST="${EXL3MT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_mt.py}"
++EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-/home/liam/glm53/nvfp4-vllm/exl3-mt/glm53_exl3_mt.so}"
  KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
  KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
  QUANTIZATION="${QUANTIZATION:-exl3}"
-@@ -194,9 +206,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
+@@ -194,9 +208,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
          *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
          *)
              if [ "$SPEC_METHOD" = "dflash" ]; then
@@ -682,7 +684,7 @@ index f3537c2..ef97f40 100755
              fi
              ;;
      esac
-@@ -222,11 +234,29 @@ ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over
+@@ -222,11 +236,34 @@ ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over
  ABLIT_INCLUDE_MTP="${ABLIT_INCLUDE_MTP:-1}"
  
  READY_TIMEOUT="${READY_TIMEOUT:-3600}"
@@ -696,6 +698,11 @@ index f3537c2..ef97f40 100755
 +# In-engine memory maintenance period (s) and whether it calls torch.cuda.empty_cache()
 +GLM53_MEM_MAINT_S="${GLM53_MEM_MAINT_S:-600}"
 +GLM53_MEM_MAINT_EMPTY_CACHE="${GLM53_MEM_MAINT_EMPTY_CACHE:-1}"
++# M-tiled EXL3 MoE kernel for prefill (overlay/patch_exl3_mt.py); 0 = upstream kernels
++GLM53_EXL3_MT="${GLM53_EXL3_MT:-0}"
++GLM53_EXL3_MT_VARIANT="${GLM53_EXL3_MT_VARIANT:-5}"
++GLM53_EXL3_MT_TEMP_ROWS="${GLM53_EXL3_MT_TEMP_ROWS:-1024}"
++GLM53_EXL3_MT_MIN_ROWS="${GLM53_EXL3_MT_MIN_ROWS:-32}"
  # 1 = suppress client stop strings until </think> (DSpark #42 class).
  GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
  # Mixed-step prefill policy when a peer is already decoding (issue #6).
@@ -712,7 +719,7 @@ index f3537c2..ef97f40 100755
  # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
  # exceed that without being a true hang. NCCL watchdog is still 600s.
  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
-@@ -314,6 +344,24 @@ banner() {
+@@ -314,6 +351,24 @@ banner() {
  
  worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
  
@@ -737,7 +744,7 @@ index f3537c2..ef97f40 100755
  usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
  
  count_shards() {
-@@ -861,7 +909,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -861,7 +916,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -754,7 +761,7 @@ index f3537c2..ef97f40 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -899,6 +955,33 @@ fi
+@@ -899,6 +962,36 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -776,6 +783,9 @@ index f3537c2..ef97f40 100755
 +if [ -f /opt/glm53/patch_live_step_counters.py ]; then
 +    python3 /opt/glm53/patch_live_step_counters.py
 +fi
++if [ -f /opt/glm53/patch_exl3_mt.py ]; then
++    python3 /opt/glm53/patch_exl3_mt.py
++fi
 +if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
 +    python3 /opt/glm53/patch_instanttensor_local.py
 +fi
@@ -788,7 +798,7 @@ index f3537c2..ef97f40 100755
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -953,7 +1036,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -953,7 +1046,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -805,7 +815,7 @@ index f3537c2..ef97f40 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -989,6 +1080,33 @@ fi
+@@ -989,6 +1090,36 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -827,6 +837,9 @@ index f3537c2..ef97f40 100755
 +if [ -f /opt/glm53/patch_live_step_counters.py ]; then
 +    python3 /opt/glm53/patch_live_step_counters.py
 +fi
++if [ -f /opt/glm53/patch_exl3_mt.py ]; then
++    python3 /opt/glm53/patch_exl3_mt.py
++fi
 +if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
 +    python3 /opt/glm53/patch_instanttensor_local.py
 +fi
@@ -839,7 +852,7 @@ index f3537c2..ef97f40 100755
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -1028,6 +1146,16 @@ launch_cluster() {
+@@ -1028,6 +1159,18 @@ launch_cluster() {
      scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
      [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
      scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
@@ -852,11 +865,13 @@ index f3537c2..ef97f40 100755
 +    scp -q -o BatchMode=yes "$LIVECTR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_live_step_counters.py"
 +    scp -q -o BatchMode=yes "$ITLOCAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_instanttensor_local.py"
 +    scp -q -o BatchMode=yes "$LOADREL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_load_release.py"
++    scp -q -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
++    [ -f "$EXL3MT_SO_HOST" ] && scp -q -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
 +    scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
      [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
      scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
  
-@@ -1053,6 +1181,16 @@ launch_cluster() {
+@@ -1053,6 +1196,20 @@ launch_cluster() {
          -e VLLM_CACHE_ROOT=/root/.cache/vllm
          -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
          -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
@@ -868,12 +883,16 @@ index f3537c2..ef97f40 100755
 +        -e "GLM53_VIZ_HZ=$GLM53_VIZ_HZ"
 +        -e "GLM53_MEM_MAINT_S=$GLM53_MEM_MAINT_S"
 +        -e "GLM53_MEM_MAINT_EMPTY_CACHE=$GLM53_MEM_MAINT_EMPTY_CACHE"
++        -e "GLM53_EXL3_MT=$GLM53_EXL3_MT"
++        -e "GLM53_EXL3_MT_VARIANT=$GLM53_EXL3_MT_VARIANT"
++        -e "GLM53_EXL3_MT_TEMP_ROWS=$GLM53_EXL3_MT_TEMP_ROWS"
++        -e "GLM53_EXL3_MT_MIN_ROWS=$GLM53_EXL3_MT_MIN_ROWS"
 +        -e "GLM53_IT_LOCAL_READS=$GLM53_IT_LOCAL_READS"
 +        -e "GLM53_LOAD_DIAG=$GLM53_LOAD_DIAG"
          -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
          -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
          -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
-@@ -1093,10 +1231,13 @@ launch_cluster() {
+@@ -1093,10 +1250,14 @@ launch_cluster() {
      local v
      for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
               MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
@@ -884,11 +903,12 @@ index f3537c2..ef97f40 100755
               LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED MODEL_DIR EXTRA_ARGS \
 +             GLM53_VIZ GLM53_VIZ_RIBBON GLM53_VIZ_UDP GLM53_VIZ_HZ \
 +             GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
++             GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
 +             GLM53_IT_LOCAL_READS \
               ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
          serve_env+=" -e $v='${!v:-}'"
      done
-@@ -1124,6 +1265,16 @@ launch_cluster() {
+@@ -1124,6 +1285,18 @@ launch_cluster() {
          -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
          -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
          -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
@@ -901,11 +921,13 @@ index f3537c2..ef97f40 100755
 +        -v '/tmp/patch_live_step_counters.py:/opt/glm53/patch_live_step_counters.py:ro' \
 +        -v '/tmp/patch_instanttensor_local.py:/opt/glm53/patch_instanttensor_local.py:ro' \
 +        -v '/tmp/patch_load_release.py:/opt/glm53/patch_load_release.py:ro' \
++        -v '/tmp/patch_exl3_mt.py:/opt/glm53/patch_exl3_mt.py:ro' \
++        $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_mt.so:/opt/glm53/glm53_exl3_mt.so:ro" ) \
 +        -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
          -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
          -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
          -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
-@@ -1155,6 +1306,17 @@ launch_cluster() {
+@@ -1155,6 +1328,19 @@ launch_cluster() {
          -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
          -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
          -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
@@ -918,12 +940,14 @@ index f3537c2..ef97f40 100755
 +        -v "$LIVECTR_PATCH_HOST:/opt/glm53/patch_live_step_counters.py:ro" \
 +        -v "$ITLOCAL_PATCH_HOST:/opt/glm53/patch_instanttensor_local.py:ro" \
 +        -v "$LOADREL_PATCH_HOST:/opt/glm53/patch_load_release.py:ro" \
++        -v "$EXL3MT_PATCH_HOST:/opt/glm53/patch_exl3_mt.py:ro" \
++        $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v $EXL3MT_SO_HOST:/opt/glm53/glm53_exl3_mt.so:ro" ) \
 +        -v "$LOADDIAG_PATCH_HOST:/opt/glm53/patch_load_diag.py:ro" \
 +        -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
          -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
          -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
          -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
-@@ -1175,6 +1337,7 @@ launch_cluster() {
+@@ -1175,6 +1361,7 @@ launch_cluster() {
          -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
          -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" -e MTP_TOKENS="$MTP_TOKENS" \
          -e SPEC_METHOD="$SPEC_METHOD" \
@@ -931,7 +955,7 @@ index f3537c2..ef97f40 100755
          -e DFLASH_TOKENS="${DFLASH_TOKENS:-7}" \
          -e DFLASH_MODEL_DIR="${DFLASH_MODEL_DIR:-}" \
          -e DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP:-}" \
-@@ -1332,7 +1495,13 @@ start() {
+@@ -1332,7 +1519,13 @@ start() {
      log "config: image=${IMAGE} tp=${TP} nnodes=${NNODES} quant=${QUANTIZATION} spec=${SPEC_METHOD} mtp=${MTP_TOKENS} dflash_k=${DFLASH_TOKENS} max-len=${MAX_MODEL_LEN} gpu-util=${GPU_MEM_UTIL} kv=${KV_CACHE_DTYPE} lm-only=${LANGUAGE_MODEL_ONLY} port=${PORT}"
  
      launch_cluster

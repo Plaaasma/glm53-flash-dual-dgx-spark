@@ -112,6 +112,14 @@ optional:
    graph capture (`GLM53_MEM_MAINT_EMPTY_CACHE=0` to log only). Grep the head
    container log for `glm53-mem` to see the trend before the watchdog does.
 
+### 1.6 Optional: faster prefill (M-tiled EXL3 MoE kernel)
+
+Pure prefill on the stock EXL3 kernels runs at ~30 to 45% of the GPU's compute ceiling because the fused MoE
+kernel re-decodes the trellis weights for every 16 rows. `nvfp4-kv/exl3-mt/` carries a 64-row-tile version of
+the same kernel (1.8 to 2.5x faster per MoE layer on prefill, decode untouched), the patcher that wires it in,
+and its tests. Build the extension with `nvfp4-kv/exl3-mt/build.sh`, point `EXL3MT_SO_HOST` at it (or copy it
+to `/home/liam/glm53/nvfp4-vllm/exl3-mt/`), and set `GLM53_EXL3_MT=1`. See `nvfp4-kv/exl3-mt/README.md`.
+
 ## 2. Get the kit and apply the patches
 
 ```bash
