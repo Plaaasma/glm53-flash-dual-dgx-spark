@@ -94,6 +94,24 @@ cgroup's `memory.reclaim`; `start.sh` calls it right after weights load
 (`GLM53_POSTREADY_RECLAIM=3`). `env.example` enables all of it; set
 `--load-format` back to `auto` and the reclaim knobs to 0 to use the stock loader.
 
+**Long-running headroom.** The post-boot headroom is not permanent: over ~14 h
+of deep-context serving both nodes crept up ~0.17 GiB/h (reclaimed cold pages
+fault back in, allocator slack accumulates, other host processes grow) until
+the worker's watchdog tripped at MemAvailable 0.75 GiB. Two mitigations, both
+optional:
+
+1. Hourly cgroup reclaim from root's crontab on **each** node (2 GiB, ~1 s,
+   no serving impact; it only pushes untouched pages to zram):
+   ```bash
+   (sudo crontab -l 2>/dev/null; echo "17 * * * * /usr/local/sbin/glm53-reclaim glm53-exl3-head 2 >> /var/tmp/glm53-reclaim.log 2>&1") | sudo crontab -   # worker: glm53-exl3-worker
+   ```
+2. In-engine maintenance (`nvfp4-kv/glm53_viz_runtime.py`, `set_batch` seam,
+   on every rank): every `GLM53_MEM_MAINT_S` seconds (default 600) it logs
+   `[glm53-mem]` (MemAvailable, process RSS/swap, torch allocated/reserved) and
+   returns caching-allocator slack with `torch.cuda.empty_cache()` outside
+   graph capture (`GLM53_MEM_MAINT_EMPTY_CACHE=0` to log only). Grep the head
+   container log for `glm53-mem` to see the trend before the watchdog does.
+
 ## 2. Get the kit and apply the patches
 
 ```bash

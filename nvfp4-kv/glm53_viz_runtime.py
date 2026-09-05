@@ -173,8 +173,47 @@ def record_ribbon(layer_idx: int, hidden: torch.Tensor) -> None:
         _disarm("record_ribbon", e)
 
 
+_MAINT_EVERY = float(os.environ.get("GLM53_MEM_MAINT_S", "600"))
+_MAINT_EMPTY = os.environ.get("GLM53_MEM_MAINT_EMPTY_CACHE", "1") == "1"
+_maint_last = [time.time()]
+
+
+def _mem_maint() -> None:
+    """Every GLM53_MEM_MAINT_S: log process/host/torch memory (both ranks) and, unless a
+    capture is in progress, return caching-allocator slack. Added 2026-09-05 after both
+    nodes ramped ~0.17 GiB/h over 14 h of serving until the worker's watchdog tripped."""
+    now = time.time()
+    if now - _maint_last[0] < _MAINT_EVERY:
+        return
+    _maint_last[0] = now
+    try:
+        import gc
+        from vllm.logger import init_logger
+        log = init_logger("vllm.glm53_mem")
+        st = {}
+        with open("/proc/self/status") as f:
+            for l in f:
+                if l.startswith(("VmRSS", "RssAnon", "RssShmem", "VmSwap")):
+                    p = l.split(); st[p[0].rstrip(":")] = int(p[1]) // 1024
+        avail = 0
+        with open("/proc/meminfo") as f:
+            for l in f:
+                if l.startswith("MemAvailable"):
+                    avail = int(l.split()[1]) // 1024; break
+        a0, r0 = torch.cuda.memory_allocated() / 2**20, torch.cuda.memory_reserved() / 2**20
+        released = 0.0
+        if _MAINT_EMPTY and not torch.cuda.is_current_stream_capturing():
+            gc.collect(); torch.cuda.empty_cache()
+            released = r0 - torch.cuda.memory_reserved() / 2**20
+        log.info("[glm53-mem] MemAvailable=%d MiB | proc VmRSS=%s RssAnon=%s RssShmem=%s VmSwap=%s MiB | torch allocated=%.0f reserved=%.0f MiB | empty_cache released %.0f MiB",
+                 avail, st.get("VmRSS"), st.get("RssAnon"), st.get("RssShmem"), st.get("VmSwap"), a0, r0, released)
+    except Exception:
+        pass
+
+
 def set_batch(input_batch) -> None:
     """Per-request token spans of the step (CPU data only; called by the model runner each step)."""
+    _mem_maint()
     if not _ON or _DEAD:
         return
     try:
