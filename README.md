@@ -138,7 +138,7 @@ messages server-side (dropping an old screenshot, a placeholder whose text chang
 token back to that point and forces a re-prefill of everything after it; in a 334K-token session that was
 ~250K tokens per `read_image` call at the 128-token mixed rate, about 15 minutes. So the design is:
 
-1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 48 images (about 48K tokens at
+1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 64 images (about 64K tokens at
    1024 tokens each). Above that, `kit-patches/patch_mm_cap.py` keeps the newest ones in batches of
    `GLM53_MM_CAP_BATCH` (16) with a constant placeholder, which is a rare fallback, not the steady state.
 2. **Bound the memory instead.** The shipped image processor allows 8000 tokens per image;
