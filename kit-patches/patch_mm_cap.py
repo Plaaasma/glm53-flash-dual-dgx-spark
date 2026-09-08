@@ -8,7 +8,15 @@ more screenshots than the limit. This patch runs before rendering (OpenAI chat a
 keeps the NEWEST N items and replaces the older ones with one short text placeholder per message,
 so the text context is untouched and the request proceeds.
 
-Runtime knob: GLM53_MM_CAP=0 disables the pass (request then fails the way upstream does).
+Prefix-cache friendliness (2026-09-08, second version): a naive "keep the newest N" changes the prompt
+every time an image is added (the window slides, and a count in the placeholder text changes), which moved the
+first difference ~85K tokens back in a 334K-token agent session and forced a full re-prefill on every
+read_image call. Now the dropped set only grows in batches of GLM53_MM_CAP_BATCH (default 8) images: with a
+limit of 16, a session carries between 9 and 16 images and the prompt prefix is stable for 8 consecutive image
+additions; the placeholder text is constant.
+
+Runtime knobs: GLM53_MM_CAP=0 disables the pass (request then fails the way upstream does);
+GLM53_MM_CAP_BATCH=8 batch size for dropping (1 = plain sliding window).
 Fail closed if the vLLM seams drift.
 """
 from __future__ import annotations
@@ -24,6 +32,7 @@ P = Path(
     )
 )
 MARK = "# [glm53-mm-cap]"
+MARK_V2 = "_glm53_mm_drop_count"
 
 HELPER = '''
 _GLM53_MM_PART_TYPES = {  # [glm53-mm-cap]
@@ -38,12 +47,27 @@ def _glm53_part_type(part):
     return getattr(part, "type", None)
 
 
+def _glm53_mm_drop_count(n_items: int, limit: int, batch: int) -> int:
+    """How many of the oldest items to drop: 0 within the limit, else the excess rounded UP to a multiple of
+    `batch`, so the dropped set (and thus the prompt prefix) only changes every `batch` additions."""
+    if n_items <= limit:
+        return 0
+    batch = max(1, batch)
+    drop = -(-(n_items - limit) // batch) * batch
+    return min(drop, n_items - 1)
+
+
 def _glm53_cap_mm_parts(request, model_config) -> None:
-    """Keep the newest `--limit-mm-per-prompt` items per modality; older ones become a text note."""
+    """Keep the newest `--limit-mm-per-prompt` items per modality (batched, see module doc); older ones
+    become a constant text note so the prompt prefix stays cacheable."""
     import os as _os
 
     if _os.environ.get("GLM53_MM_CAP", "1") != "1":
         return
+    try:
+        batch = int(_os.environ.get("GLM53_MM_CAP_BATCH", "8"))
+    except ValueError:
+        batch = 8
     mm_config = getattr(model_config, "multimodal_config", None)
     messages = getattr(request, "messages", None)
     if mm_config is None or not isinstance(messages, list):
@@ -64,9 +88,10 @@ def _glm53_cap_mm_parts(request, model_config) -> None:
                 if _glm53_part_type(part) in types:
                     locs.append((mi, pi))
         n_items = len(locs)
-        if n_items <= limit:
+        n_drop = _glm53_mm_drop_count(n_items, limit, batch)
+        if n_drop <= 0:
             continue
-        drop = set(locs[: n_items - limit])
+        drop = set(locs[:n_drop])
         by_msg: dict[int, set[int]] = {}
         for mi, pi in drop:
             by_msg.setdefault(mi, set()).add(pi)
@@ -80,10 +105,7 @@ def _glm53_cap_mm_parts(request, model_config) -> None:
                     if not placed:
                         new_content.append({
                             "type": "text",
-                            "text": (
-                                f"[{len(drop_idx)} earlier {modality}(s) omitted: this conversation carries "
-                                f"{n_items} {modality}s and the server keeps only the newest {limit}]"
-                            ),
+                            "text": f"[earlier {modality}(s) omitted by the server: per-prompt {modality} limit]",
                         })
                         placed = True
                     continue
@@ -93,9 +115,9 @@ def _glm53_cap_mm_parts(request, model_config) -> None:
             else:
                 msg.content = new_content
         logger.warning(
-            "[glm53-mm-cap] %d %s parts in one prompt (limit %d): kept the newest %d, replaced %d older "
+            "[glm53-mm-cap] %d %s parts in one prompt (limit %d, batch %d): kept the newest %d, replaced %d older "
             "ones with text placeholders across %d message(s)",
-            n_items, modality, limit, limit, len(drop), len(by_msg),
+            n_items, modality, limit, batch, n_items - len(drop), len(drop), len(by_msg),
         )
 
 
@@ -114,8 +136,10 @@ def main() -> int:
         raise SystemExit(f"missing {P}")
     text = P.read_text()
     if MARK in text:
-        print(f"{P.name}: {MARK} already present — skipping")
-        return 0
+        if MARK_V2 in text:
+            print(f"{P.name}: {MARK} v2 already present — skipping")
+            return 0
+        raise SystemExit(f"{P}: carries the v1 [glm53-mm-cap] patch; rebuild from a clean image (no in-place upgrade)")
     for label, needle in (("class anchor", CLASS_ANCHOR), ("render seam", SEAM_OLD), ("logger", "logger = init_logger(__name__)\n")):
         if text.count(needle) != 1:
             raise SystemExit(f"{P}: expected exactly one {label}, found {text.count(needle)} (upstream drift)")

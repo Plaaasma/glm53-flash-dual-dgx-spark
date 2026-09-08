@@ -256,6 +256,7 @@ GLM53_EXL3_MT_TEMP_ROWS="${GLM53_EXL3_MT_TEMP_ROWS:-1024}"
 GLM53_EXL3_MT_MIN_ROWS="${GLM53_EXL3_MT_MIN_ROWS:-32}"
 # Requests over --limit-mm-per-prompt: keep the newest N images/videos instead of 400 (overlay/patch_mm_cap.py)
 GLM53_MM_CAP="${GLM53_MM_CAP:-1}"
+GLM53_MM_CAP_BATCH="${GLM53_MM_CAP_BATCH:-8}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
 GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
@@ -1250,6 +1251,7 @@ launch_cluster() {
         -e "GLM53_EXL3_MT_TEMP_ROWS=$GLM53_EXL3_MT_TEMP_ROWS"
         -e "GLM53_EXL3_MT_MIN_ROWS=$GLM53_EXL3_MT_MIN_ROWS"
         -e "GLM53_MM_CAP=$GLM53_MM_CAP"
+        -e "GLM53_MM_CAP_BATCH=$GLM53_MM_CAP_BATCH"
         -e "GLM53_IT_LOCAL_READS=$GLM53_IT_LOCAL_READS"
         -e "GLM53_LOAD_DIAG=$GLM53_LOAD_DIAG"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
@@ -1299,7 +1301,7 @@ launch_cluster() {
              GLM53_VIZ GLM53_VIZ_RIBBON GLM53_VIZ_UDP GLM53_VIZ_HZ \
              GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
              GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
-             GLM53_MM_CAP \
+             GLM53_MM_CAP GLM53_MM_CAP_BATCH \
              GLM53_IT_LOCAL_READS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"

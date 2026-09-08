@@ -137,7 +137,14 @@ Once an agent session carries more screenshots than `--limit-mm-per-prompt`, vLL
 `400 At most N image(s) may be provided in one prompt`. `kit-patches/patch_mm_cap.py` keeps the newest N
 (and the newest video) and replaces older ones with one short text placeholder per message, so the text
 context is untouched and the request goes through; it logs a `[glm53-mm-cap]` warning per capped request.
-`GLM53_MM_CAP=0` restores the upstream rejection. Test: `kit-patches/tests/test_mm_cap.py`.
+`GLM53_MM_CAP=0` restores the upstream rejection. Tests: `kit-patches/tests/test_mm_cap.py`, `test_mm_cap2.py`.
+
+Prefix-cache trap (cost one 334K-token re-prefill per `read_image` call before it was fixed): a plain
+"keep the newest N" changes the prompt every time an image is added, both because the window slides and
+because any count in the placeholder text changes, so the first difference lands wherever the oldest kept
+image was, often 100K+ tokens back. The patch therefore drops in batches of `GLM53_MM_CAP_BATCH` (8): a
+session carries 9 to 16 images, the dropped set and the constant placeholder text only change every 8
+additions, and the KV prefix cache keeps hitting in between.
 
 The memory side matters more than the limit on this box. The shipped image processor allows 8000 tokens per
 image, so a 1920x1080 screenshot becomes 2691 tokens and costs ~200 MB of host RAM while it is preprocessed
