@@ -159,7 +159,9 @@ token back to that point and forces a re-prefill of everything after it; in a 33
    the cap pass admits at most `GLM53_MM_COLD_MAX` (24) never-seen images per request, newest first, and keeps
    every image it accepted before (a bounded LRU of content hashes; rejected ones stay rejected). A session's
    first turn after a restart is capped, then it grows append-only to the limit with the prefix cache hitting
-   (`kit-patches/tests/test_mm_cap3.py`).
+   (`kit-patches/tests/test_mm_cap3.py`). Measured live: a cold 40-screenshot turn admitted 24 (57 s, head
+   dipped 4.8 -> 2.3 GiB); the next turn with one more screenshot kept 25, found 25,856 of 25,914 tokens in
+   the prefix cache, and answered in 10 s.
 
 On this box the head node has 3 to 6 GB of headroom next to the serving processes, which is why all four
 matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
