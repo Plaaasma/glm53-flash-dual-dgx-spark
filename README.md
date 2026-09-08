@@ -147,9 +147,11 @@ token back to that point and forces a re-prefill of everything after it; in a 33
    all of a request's uncached images to the HF processor in one call, so `kit-patches/patch_mm_chunk.py`
    runs it in chunks of `GLM53_MM_CHUNK` (4) images: 32 cold images peak at 1.2 GB instead of 3.2 GB, with
    byte-identical outputs (`kit-patches/tests/test_mm_chunk.py`).
-3. **Cache repeated images once.** `--mm-processor-cache-type shm --mm-processor-cache-gb 2` keeps processed
-   images in one shared-memory cache (no per-process mirror), so a turn that adds one screenshot preprocesses
-   one image and ships the rest as hashes; a warm repeat of 32 images costs 0.3 s and no memory.
+3. **Cache repeated images.** `--mm-processor-cache-type lru --mm-processor-cache-gb 1` keeps processed images
+   in the API server's sender cache and the engine core's mirrored receiver cache (up to 2 GiB on the head when
+   full), so a turn that adds one screenshot preprocesses one image and ships the rest as hashes; a warm repeat
+   of 32 images costs 0.3 s and no memory. The `shm` cache type does NOT work on a two-node TP setup: the
+   worker on the other machine tries to open the head's POSIX shm segment and dies at startup.
 
 On this box the head node has 3 to 6 GB of headroom next to the serving processes, which is why all three
 matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
