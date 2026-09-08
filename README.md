@@ -138,7 +138,7 @@ messages server-side (dropping an old screenshot, a placeholder whose text chang
 token back to that point and forces a re-prefill of everything after it; in a 334K-token session that was
 ~250K tokens per `read_image` call at the 128-token mixed rate, about 15 minutes. So the design is:
 
-1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 64 images (about 64K tokens at
+1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 128 images (about 129K tokens at
    1024 tokens each). Above that, `kit-patches/patch_mm_cap.py` keeps the newest ones in batches of
    `GLM53_MM_CAP_BATCH` (16) with a constant placeholder, which is a rare fallback, not the steady state.
 2. **Bound the memory instead.** The shipped image processor allows 8000 tokens per image;
@@ -147,7 +147,7 @@ token back to that point and forces a re-prefill of everything after it; in a 33
    all of a request's uncached images to the HF processor in one call, so `kit-patches/patch_mm_chunk.py`
    runs it in chunks of `GLM53_MM_CHUNK` (4) images: 32 cold images peak at 1.2 GB instead of 3.2 GB, with
    byte-identical outputs (`kit-patches/tests/test_mm_chunk.py`).
-3. **Cache repeated images once.** `--mm-processor-cache-type shm --mm-processor-cache-gb 1` keeps processed
+3. **Cache repeated images once.** `--mm-processor-cache-type shm --mm-processor-cache-gb 2` keeps processed
    images in one shared-memory cache (no per-process mirror), so a turn that adds one screenshot preprocesses
    one image and ships the rest as hashes; a warm repeat of 32 images costs 0.3 s and no memory.
 
