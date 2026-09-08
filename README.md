@@ -100,13 +100,16 @@ fault back in, allocator slack accumulates, other host processes grow) until
 the worker's watchdog tripped at MemAvailable 0.75 GiB. Two mitigations, both
 optional:
 
-1. Hourly cgroup reclaim from root's crontab on **each** node (2 GiB, ~1 s,
-   no serving impact; it only pushes untouched pages to zram):
+1. Periodic cgroup reclaim from root's crontab on **each** node (2 GiB every
+   20 min; a few seconds idle, up to ~3 min under heavy prefill load, no
+   serving impact; it only pushes untouched pages to zram). Hourly was not
+   enough: under sustained deep-context prefill the worker dipped from ~3 GiB
+   to 1.4 GiB between runs and the watchdog tripped once at 0.75 GiB.
    ```bash
-   (sudo crontab -l 2>/dev/null; echo "17 * * * * /usr/local/sbin/glm53-reclaim glm53-exl3-head 2 >> /var/tmp/glm53-reclaim.log 2>&1") | sudo crontab -   # worker: glm53-exl3-worker
+   (sudo crontab -l 2>/dev/null; echo "*/20 * * * * /usr/local/sbin/glm53-reclaim glm53-exl3-head 2 >> /var/tmp/glm53-reclaim.log 2>&1") | sudo crontab -   # worker: glm53-exl3-worker
    ```
 2. In-engine maintenance (`nvfp4-kv/glm53_viz_runtime.py`, `set_batch` seam,
-   on every rank): every `GLM53_MEM_MAINT_S` seconds (default 600) it logs
+   on every rank): every `GLM53_MEM_MAINT_S` seconds (default 600; the live kit runs 300) it logs
    `[glm53-mem]` (MemAvailable, process RSS/swap, torch allocated/reserved) and
    returns caching-allocator slack with `torch.cuda.empty_cache()` outside
    graph capture (`GLM53_MEM_MAINT_EMPTY_CACHE=0` to log only). Grep the head
