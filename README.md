@@ -131,14 +131,23 @@ the same kernel (1.8 to 2.5x faster per MoE layer on prefill, decode untouched),
 and its tests. Build the extension with `nvfp4-kv/exl3-mt/build.sh`, point `EXL3MT_SO_HOST` at it (or copy it
 to `/home/liam/glm53/nvfp4-vllm/exl3-mt/`), and set `GLM53_EXL3_MT=1`. See `nvfp4-kv/exl3-mt/README.md`.
 
-### 1.7 Long multimodal sessions: truncate images instead of a 400
+### 1.7 Long multimodal sessions: truncate images instead of a 400, and bound their memory
 
-Once an agent session carries more screenshots than `--limit-mm-per-prompt` (32 images here), vLLM answers
-`400 At most 32 image(s) may be provided in one prompt`. `kit-patches/patch_mm_cap.py` keeps the newest 32
+Once an agent session carries more screenshots than `--limit-mm-per-prompt`, vLLM answers
+`400 At most N image(s) may be provided in one prompt`. `kit-patches/patch_mm_cap.py` keeps the newest N
 (and the newest video) and replaces older ones with one short text placeholder per message, so the text
 context is untouched and the request goes through; it logs a `[glm53-mm-cap]` warning per capped request.
-`GLM53_MM_CAP=0` restores the upstream rejection. Test: `kit-patches/tests/test_mm_cap.py` inside a throwaway
-container of the serving image.
+`GLM53_MM_CAP=0` restores the upstream rejection. Test: `kit-patches/tests/test_mm_cap.py`.
+
+The memory side matters more than the limit on this box. The shipped image processor allows 8000 tokens per
+image, so a 1920x1080 screenshot becomes 2691 tokens and costs ~200 MB of host RAM while it is preprocessed
+(measured with vLLM's own processor), and the default multimodal processor cache keeps 4 GiB per process
+(API server and engine core). A cold 32-screenshot session therefore needs ~6.5 GB on a head node that has
+3 to 5 GB of headroom: it killed the head 3 s into prefill. The settings in `env.example` bound it:
+`--mm-processor-kwargs {"max_image_tokens":1024}` (1008 tokens per 1080p screenshot, still readable),
+`--mm-processor-cache-gb 0` (images are re-preprocessed each turn, ~50 ms each; the KV prefix cache still
+makes repeated turns fast), and 16 images kept. Measured after the change: 16 cold 1080p screenshots in one
+request dip the head by 2.5 GB during preprocessing and are reused, not accumulated, on the next request.
 
 ## 2. Get the kit and apply the patches
 
