@@ -123,6 +123,15 @@ the same kernel (1.8 to 2.5x faster per MoE layer on prefill, decode untouched),
 and its tests. Build the extension with `nvfp4-kv/exl3-mt/build.sh`, point `EXL3MT_SO_HOST` at it (or copy it
 to `/home/liam/glm53/nvfp4-vllm/exl3-mt/`), and set `GLM53_EXL3_MT=1`. See `nvfp4-kv/exl3-mt/README.md`.
 
+### 1.7 Long multimodal sessions: truncate images instead of a 400
+
+Once an agent session carries more screenshots than `--limit-mm-per-prompt` (32 images here), vLLM answers
+`400 At most 32 image(s) may be provided in one prompt`. `kit-patches/patch_mm_cap.py` keeps the newest 32
+(and the newest video) and replaces older ones with one short text placeholder per message, so the text
+context is untouched and the request goes through; it logs a `[glm53-mm-cap]` warning per capped request.
+`GLM53_MM_CAP=0` restores the upstream rejection. Test: `kit-patches/tests/test_mm_cap.py` inside a throwaway
+container of the serving image.
+
 ## 2. Get the kit and apply the patches
 
 ```bash

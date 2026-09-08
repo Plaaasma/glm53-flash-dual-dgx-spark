@@ -188,6 +188,7 @@ LOADDIAG_PATCH_HOST="${LOADDIAG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_diag.
 LOADREL_PATCH_HOST="${LOADREL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_release.py}"
 EXL3MT_PATCH_HOST="${EXL3MT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_mt.py}"
 EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-/home/liam/glm53/nvfp4-vllm/exl3-mt/glm53_exl3_mt.so}"
+MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
@@ -251,6 +252,8 @@ GLM53_EXL3_MT="${GLM53_EXL3_MT:-0}"
 GLM53_EXL3_MT_VARIANT="${GLM53_EXL3_MT_VARIANT:-5}"
 GLM53_EXL3_MT_TEMP_ROWS="${GLM53_EXL3_MT_TEMP_ROWS:-1024}"
 GLM53_EXL3_MT_MIN_ROWS="${GLM53_EXL3_MT_MIN_ROWS:-32}"
+# Requests over --limit-mm-per-prompt: keep the newest N images/videos instead of 400 (overlay/patch_mm_cap.py)
+GLM53_MM_CAP="${GLM53_MM_CAP:-1}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
 GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
@@ -983,6 +986,9 @@ fi
 if [ -f /opt/glm53/patch_exl3_mt.py ]; then
     python3 /opt/glm53/patch_exl3_mt.py
 fi
+if [ -f /opt/glm53/patch_mm_cap.py ]; then
+    python3 /opt/glm53/patch_mm_cap.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1111,6 +1117,9 @@ fi
 if [ -f /opt/glm53/patch_exl3_mt.py ]; then
     python3 /opt/glm53/patch_exl3_mt.py
 fi
+if [ -f /opt/glm53/patch_mm_cap.py ]; then
+    python3 /opt/glm53/patch_mm_cap.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1169,6 +1178,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$ITLOCAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_instanttensor_local.py"
     scp -q -o BatchMode=yes "$LOADREL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_load_release.py"
     scp -q -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
+    scp -q -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
     [ -f "$EXL3MT_SO_HOST" ] && scp -q -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
     scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1208,6 +1218,7 @@ launch_cluster() {
         -e "GLM53_EXL3_MT_VARIANT=$GLM53_EXL3_MT_VARIANT"
         -e "GLM53_EXL3_MT_TEMP_ROWS=$GLM53_EXL3_MT_TEMP_ROWS"
         -e "GLM53_EXL3_MT_MIN_ROWS=$GLM53_EXL3_MT_MIN_ROWS"
+        -e "GLM53_MM_CAP=$GLM53_MM_CAP"
         -e "GLM53_IT_LOCAL_READS=$GLM53_IT_LOCAL_READS"
         -e "GLM53_LOAD_DIAG=$GLM53_LOAD_DIAG"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
@@ -1257,6 +1268,7 @@ launch_cluster() {
              GLM53_VIZ GLM53_VIZ_RIBBON GLM53_VIZ_UDP GLM53_VIZ_HZ \
              GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
              GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
+             GLM53_MM_CAP \
              GLM53_IT_LOCAL_READS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
@@ -1295,6 +1307,7 @@ launch_cluster() {
         -v '/tmp/patch_instanttensor_local.py:/opt/glm53/patch_instanttensor_local.py:ro' \
         -v '/tmp/patch_load_release.py:/opt/glm53/patch_load_release.py:ro' \
         -v '/tmp/patch_exl3_mt.py:/opt/glm53/patch_exl3_mt.py:ro' \
+        -v '/tmp/patch_mm_cap.py:/opt/glm53/patch_mm_cap.py:ro' \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_mt.so:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
@@ -1338,6 +1351,7 @@ launch_cluster() {
         -v "$ITLOCAL_PATCH_HOST:/opt/glm53/patch_instanttensor_local.py:ro" \
         -v "$LOADREL_PATCH_HOST:/opt/glm53/patch_load_release.py:ro" \
         -v "$EXL3MT_PATCH_HOST:/opt/glm53/patch_exl3_mt.py:ro" \
+        -v "$MMCAP_PATCH_HOST:/opt/glm53/patch_mm_cap.py:ro" \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v $EXL3MT_SO_HOST:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v "$LOADDIAG_PATCH_HOST:/opt/glm53/patch_load_diag.py:ro" \
         -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
