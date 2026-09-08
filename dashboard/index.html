@@ -97,6 +97,11 @@ body{
 .meter.mid .fl{background:var(--gold)}
 .nfoot{font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost);margin-top:6px}
 .nfoot.alert{color:#ff6b6b;font-weight:700}
+.kvlegend{position:absolute;left:10px;bottom:10px;z-index:3;font:600 11px 'IBM Plex Mono',monospace;color:#dfe6ee;background:rgba(11,13,16,.82);border:1px solid var(--line);padding:6px 8px;pointer-events:none;max-width:70%}
+.kvlegend .row{display:flex;align-items:center;gap:7px;margin:2px 0;white-space:nowrap}
+.kvlegend .sw{width:8px;height:8px;flex:none}
+.kvlegend .bar{width:64px;height:5px;background:#1b2028;flex:none;overflow:hidden}
+.kvlegend .fill{height:100%}
 .savebox select{
   background:var(--ink);border:1px solid var(--line2);color:var(--mut);border-radius:3px;
   font:500 11px 'IBM Plex Mono',monospace;padding:2px 5px;cursor:pointer;
@@ -143,7 +148,7 @@ footer{padding:26px 0 8px;text-align:center;font:500 10.5px 'IBM Plex Mono',mono
 #ambient .ah button:hover{color:var(--fg)}
 #agrid{display:grid;grid-template-columns:2fr 1fr;gap:14px}
 @media(max-width:1100px){#agrid{grid-template-columns:1fr}}
-.apanel{border:1px solid var(--line);background:var(--ink2);min-width:0}
+.apanel{border:1px solid var(--line);background:var(--ink2);min-width:0;position:relative}
 .apanel .ph{display:flex;align-items:baseline;gap:12px;padding:9px 12px 8px;border-bottom:1px solid var(--line)}
 .apanel .ph h4{font:600 11px 'IBM Plex Mono',monospace;color:var(--mut);letter-spacing:.14em;text-transform:uppercase}
 .apanel .ph .sub{margin-left:auto;font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost)}
@@ -187,7 +192,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
     <div class="sec">
       <div class="cap">throughput</div>
       <div class="bignum">
-        <div class="bn acc"><div class="v mono"><span id="r_gen">—</span><em>tok/s out</em></div><div class="k">generation · <span id="r_genper">—</span> per stream</div></div>
+        <div class="bn acc"><div class="v mono"><span id="r_gen">—</span><em>tok/s out</em></div><div class="k">generation · <span id="r_genper">—</span> per stream<span id="r_pre"></span></div></div>
         <div class="bn"><div class="v mono"><span id="r_pp">—</span><em>tok/s in</em></div><div class="k">prefill</div></div>
       </div>
     </div>
@@ -256,7 +261,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
         <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
         <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas></div>
+        <div class="apanel"><div class="ph"><h4>kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas><div id="kv3_legend" class="kvlegend" hidden></div></div>
       </div>
       <div id="agrid" hidden>
         <div class="apanel"><div class="ph"><h4>expert routing — 42 layers × 288 experts</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
@@ -364,7 +369,7 @@ async function fetchHist(){
     const r = await fetch(`${API}/history?from=${(view.t1-view.span)/1000}&to=${view.t1/1000}&points=520`, {cache:"no-store"});
     H = await r.json();
     // per-stream decode = aggregate generate / running requests, per bucket
-    H.gen_per = (H.t||[]).map((_,i)=> (H.run && H.run[i] > 0 && H.gen && H.gen[i] != null) ? H.gen[i]/H.run[i] : null);
+    H.gen_per = (H.t||[]).map((_,i)=>{ const d = (H.dec && H.dec[i] != null) ? H.dec[i] : (H.run ? H.run[i] : null); return (d > 0 && H.gen && H.gen[i] != null) ? H.gen[i]/d : null; });   // decoding streams only; a prefilling request generates nothing
     drawAll();
   }catch(e){}
   fetching = false;
@@ -421,7 +426,9 @@ function renderRail(){
   const r = d.row || {};
   const put = (id,v,f) => $(id).textContent = v==null?"—":f(v);
   put("r_gen", r.gen, v=>v.toFixed(1));
-  $("r_genper").textContent = (r.run > 0 && r.gen != null) ? (r.gen / r.run).toFixed(1) + " tok/s" : "—";
+  { const dec = (r.dec != null) ? r.dec : r.run, pre = (r.dec != null && r.run != null) ? Math.max(0, r.run - r.dec) : 0;
+    $("r_genper").textContent = (dec > 0 && r.gen != null) ? (r.gen / dec).toFixed(1) + " tok/s" : "—";
+    $("r_pre").textContent = pre ? ` · ${pre} prefilling` : ""; }
   put("r_pp", r.pp, v=>Math.round(v)+"");
   put("r_acc", r.accpct, v=>v.toFixed(1)+"%");
   put("r_tau", r.tau, v=>v.toFixed(2)+" tok");
@@ -729,6 +736,11 @@ function drawKV(){
     if (r.computed < r.prompt){ const [x,y]=cell(Math.min(tiles-1,cursor+done)); ctx.fillStyle="#fff"; ctx.fillRect(x,y,tw,th); }   // prefill head
     cursor += nt; });
   const used = Math.round(tiles*s.usage); for (let i=cursor;i<used && i<tiles;i++){ const [x,y]=cell(i); ctx.fillStyle="#2a323d"; ctx.fillRect(x+0.5,y+0.5,tw-1,th-1); }  // cached / other
+  // per-request progress legend (top-left): id · computed/prompt · prefill % or generating
+  const lines = (s.reqs||[]).slice(0,8).map((r,k)=>[palette[k%palette.length], reqLabel(r)]);
+  if (lines.length){ ctx.font = "600 11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; const lw = Math.max(...lines.map(l=>ctx.measureText(l[1]).width)) + 26, lh = 15;
+    ctx.fillStyle = "rgba(11,13,16,0.82)"; ctx.fillRect(6, 6, lw, lines.length*lh + 8);
+    lines.forEach(([col, txt], i)=>{ ctx.fillStyle = col; ctx.fillRect(12, 12 + i*lh, 8, 8); ctx.fillStyle = "#dfe6ee"; ctx.fillText(txt, 26, 20 + i*lh); }); }
   $("kv_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting`;
   const kvh = $("cv_kv").parentElement.querySelector("h4"); if (kvh) kvh.textContent = `kv pool — ${(pool/1e6).toFixed(2)}M tokens`;
 }
@@ -919,12 +931,20 @@ function drawTerrain(){
   o.r.render(o.s, o.c);
 }
 /* kv rack: requests as rows of blocks */
+const fmtK = v => v >= 1e6 ? (v/1e6).toFixed(2)+"M" : v >= 1e3 ? Math.round(v/1e3)+"K" : String(v);
+function reqLabel(r){ return r.computed < r.prompt ? `${r.id} · ${fmtK(r.computed)}/${fmtK(r.prompt)} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}%` : `${r.id} · ${fmtK(r.total)} ctx · generating`; }
+function labelSprite(){ const cv = document.createElement("canvas"); cv.width = 512; cv.height = 64; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(15, 1.9, 1); sp.userData = {cv, tex, text: ""}; return sp; }
+function setLabel(sp, text, col){ if (sp.userData.text === text && sp.userData.col === col) return; const {cv, tex} = sp.userData, g = cv.getContext("2d");
+  g.clearRect(0,0,cv.width,cv.height); g.fillStyle = "rgba(11,13,16,0.75)"; g.fillRect(0, 8, cv.width, 48); g.fillStyle = col; g.fillRect(10, 22, 18, 18);
+  g.font = "600 26px 'IBM Plex Mono', monospace"; g.fillStyle = "#e8eef4"; g.textBaseline = "middle"; g.fillText(text, 40, 32); tex.needsUpdate = true; sp.userData.text = text; sp.userData.col = col; }
 function initKV3(){
   const o = mk3("cv3_kv"); if (!o) return; o.rad = o.rad0 = 40; o.theta = 0.5; o.phi = 1.0; o.target.set(0, 0, -8);
   o.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8,1,0.8), new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.95}), 8*96);
   o.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(8*96*3), 3);   // must exist before the first render or the shader ignores per-instance colour
   o.mesh.count = 0; o.s.add(o.mesh);
   const fl = new THREE.Mesh(new THREE.PlaneGeometry(96, 20), new THREE.MeshBasicMaterial({color:0x12161c, side:THREE.DoubleSide})); fl.rotation.x = -Math.PI/2; fl.position.set(0,-0.81,-8); o.s.add(fl);
+  o.labels = [];
   S3.kv = o;
 }
 function drawKV3(){
@@ -933,6 +953,17 @@ function drawKV3(){
     (s.reqs||[]).slice(0,8).forEach((r,k)=>{ const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))), done=Math.round(nb*r.computed/Math.max(r.total,1)); const z=-(k-3.5)*2.2;
       for (let i=0;i<nb&&n<768;i++){ const isHead = (r.computed<r.prompt && i===done), h = i<done ? 1.8 : 0.5; m.makeScale(1, isHead?2.6:h, 1); m.setPosition((i-(nb-1)/2)*0.95, (isHead?2.6:h)/2-0.8, z); o.mesh.setMatrixAt(n, m); c.set(pal[k%8]); if (i>=done && !isHead) c.multiplyScalar(0.3); if (isHead) c.set(0xffffff); o.mesh.setColorAt(n, c); n++; } });
     o.mesh.count = n; o.mesh.instanceMatrix.needsUpdate = true; if (o.mesh.instanceColor) o.mesh.instanceColor.needsUpdate = true;
+    // one floating label per request row: id · computed/prompt · prefill % (or generating)
+    const reqs = (s.reqs||[]).slice(0,8);
+    while (o.labels.length < reqs.length){ const sp = labelSprite(); o.s.add(sp); o.labels.push(sp); }
+    while (o.labels.length > reqs.length){ const sp = o.labels.pop(); o.s.remove(sp); }
+    reqs.forEach((r,k)=>{ const sp = o.labels[k]; const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))); setLabel(sp, reqLabel(r), pal[k%8]); sp.position.set(0, 2.9 + k*1.5, -(k-3.5)*2.2); });   // stacked above the rack so they never overlap
+    { const lg = $("kv3_legend"); if (lg){ lg.replaceChildren(); reqs.forEach((r,k)=>{ const row = document.createElement("div"); row.className = "row";
+        const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = pal[k%8];
+        const tx = document.createElement("span"); tx.textContent = reqLabel(r);
+        const bar = document.createElement("span"); bar.className = "bar"; const fill = document.createElement("span"); fill.className = "fill"; fill.style.background = pal[k%8];
+        fill.style.width = (r.computed < r.prompt ? Math.round(100*r.computed/Math.max(r.prompt,1)) : 100) + "%"; bar.appendChild(fill);
+        row.append(sw, tx, bar); lg.appendChild(row); }); lg.hidden = reqs.length === 0; } }
     $("kv3_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting · 1 block ≈ ${Math.round(pool/384/1000)}K tokens`; o.dirty=false; }
   o.r.render(o.s, o.c);
 }

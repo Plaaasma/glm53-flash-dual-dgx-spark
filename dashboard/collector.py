@@ -23,7 +23,7 @@ RETAIN_S = 35 * 86400          # keep 35 days
 HIST_WINDOW = 120              # seconds of histogram ring for percentiles
 
 COLS = ["gen","pp","accpct","draftrate","tau","kv","pfx",
-        "ttft50","ttft99","itl50","itl99","run","wait",
+        "ttft50","ttft99","itl50","itl99","run","wait","dec",
         "pos0","pos1","pos2","pos3","pos4","pos5","pos6",
         "wait_cap","wait_def","steps","stepsz","q50","q99","cachedpct","tflops",
         "tok_total","tok_in","tok_out","req_ok","preempt",
@@ -227,6 +227,14 @@ def _fill_vllm(p, now, row, slot):
     row["kv"] = kv * 100 if kv is not None else None
     row["pfx"] = 100 * pfh / pfq if pfq > 0 else None
     row["run"] = psum(p, "vllm:num_requests_running")
+    # Streams actually decoding (past their prompt) per the scheduler snapshot; a request still
+    # prefilling contributes 0 generated tokens, so dividing by "running" understated per-stream
+    # decode whenever a prefill was in flight (Liam, 2026-09-08). None = snapshot stale -> UI falls back to run.
+    sch = state.get("viz_sched")
+    if sch and now - sch.get("ts", 0) < 5 and isinstance(sch.get("reqs"), list):
+        row["dec"] = sum(1 for q in sch["reqs"] if (q.get("prompt") or 0) > 0 and (q.get("computed") or 0) >= q["prompt"])
+    else:
+        row["dec"] = None
     row["wait"] = psum(p, "vllm:num_requests_waiting")
     for labels, v in p.get("vllm:num_requests_waiting_by_reason", []):
         r = labels.get("reason", "")
