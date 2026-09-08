@@ -641,7 +641,7 @@ index 0000000..f9917cc
 +if __name__ == "__main__":
 +    sys.exit(main())
 diff --git a/start.sh b/start.sh
-index f3537c2..624275d 100755
+index f3537c2..827ee2f 100755
 --- a/start.sh
 +++ b/start.sh
 @@ -149,6 +149,7 @@ PORT="${PORT:-8888}"
@@ -685,7 +685,7 @@ index f3537c2..624275d 100755
              fi
              ;;
      esac
-@@ -222,11 +237,36 @@ ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over
+@@ -222,11 +237,38 @@ ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over
  ABLIT_INCLUDE_MTP="${ABLIT_INCLUDE_MTP:-1}"
  
  READY_TIMEOUT="${READY_TIMEOUT:-3600}"
@@ -696,6 +696,8 @@ index f3537c2..624275d 100755
 +# Second reclaim once the API is up (covers the API server + engine pages
 +# that were touched during startup; 0 = off).
 +GLM53_POSTREADY_RECLAIM="${GLM53_POSTREADY_RECLAIM:-0}"
++# Boot-time headroom guard (host side): reclaim 2 GiB on a node whose MemAvailable drops under this many MiB
++GLM53_BOOT_GUARD_MIB="${GLM53_BOOT_GUARD_MIB:-2500}"
 +# In-engine memory maintenance period (s) and whether it calls torch.cuda.empty_cache()
 +GLM53_MEM_MAINT_S="${GLM53_MEM_MAINT_S:-600}"
 +GLM53_MEM_MAINT_EMPTY_CACHE="${GLM53_MEM_MAINT_EMPTY_CACHE:-1}"
@@ -722,32 +724,61 @@ index f3537c2..624275d 100755
  # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
  # exceed that without being a true hang. NCCL watchdog is still 600s.
  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
-@@ -314,6 +354,24 @@ banner() {
+@@ -314,6 +356,53 @@ banner() {
  
  worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
  
 +postload_reclaim_watch() {
-+    # Runs in the background from start(): waits for the head to finish
-+    # loading weights, then reclaims cold pages from both serving containers
++    # Runs in the background from start(): as soon as the first weight pass has
++    # landed, reclaims cold pages from both serving containers IN PARALLEL
 +    # (root helper /usr/local/sbin/glm53-reclaim, NOPASSWD via sudoers.d).
++    # Boot 14 (2026-09-08) lost the race when this waited for "Model loading
++    # took" and ran the head first: the worker tripped its watchdog 10 s later
++    # while the head reclaim (9 s) was still running.
 +    local n="${GLM53_POSTLOAD_RECLAIM:-0}" i
 +    [ "$n" != "0" ] || return 0
 +    for i in $(seq 1 600); do
-+        if docker logs "$CONTAINER_HEAD" 2>&1 | grep -aq "Model loading took"; then
-+            log "post-load reclaim: pushing ${n} GiB of cold pages to zram on both nodes ..."
-+            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$n" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed"
-+            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$n'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed"
++        if docker logs "$CONTAINER_HEAD" 2>&1 | grep -aq "Loading weights took\|Model loading took"; then
++            log "post-load reclaim: pushing ${n} GiB of cold pages to zram on both nodes (parallel) ..."
++            ( sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$n" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed" ) &
++            ( worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$n'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed" ) &
++            wait
 +            return 0
 +        fi
 +        sleep 2
 +    done
-+    warn "post-load reclaim: never saw 'Model loading took' — skipped"
++    warn "post-load reclaim: never saw 'Loading weights took' — skipped"
++}
++
++boot_headroom_guard() {
++    # Runs in the background from start() until the API is healthy: if either
++    # node's MemAvailable drops under GLM53_BOOT_GUARD_MIB (default 2500) during
++    # load / KV allocation / graph capture, reclaim 2 GiB there (at most every
++    # 20 s per node). The watchdog kills at 750 MiB; this keeps boots away from it.
++    local thr="${GLM53_BOOT_GUARD_MIB:-2500}" last_h=0 last_w=0 now h w
++    [ "$thr" != "0" ] || return 0
++    while true; do
++        now=$(date +%s)
++        h=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
++        w=$(worker_ssh "awk '/MemAvailable/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 999999)
++        if [ "${h:-999999}" -lt "$thr" ] && [ $((now - last_h)) -gt 20 ]; then
++            log "boot guard: head MemAvailable ${h} MiB < ${thr} — reclaiming 2 GiB"
++            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" 2 2>&1 | sed 's/^/    head:   /' || true
++            last_h=$now
++        fi
++        if [ "${w:-999999}" -lt "$thr" ] && [ $((now - last_w)) -gt 20 ]; then
++            log "boot guard: worker MemAvailable ${w} MiB < ${thr} — reclaiming 2 GiB"
++            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' 2" 2>&1 | sed 's/^/    worker: /' || true
++            last_w=$now
++        fi
++        sleep 2
++    done
 +}
 +
  usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
  
  count_shards() {
-@@ -861,7 +919,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -861,7 +950,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -764,7 +795,7 @@ index f3537c2..624275d 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -899,6 +965,39 @@ fi
+@@ -899,6 +996,39 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -804,7 +835,7 @@ index f3537c2..624275d 100755
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -953,7 +1052,15 @@ print(json.dumps(spec,separators=(",",":")))')")
+@@ -953,7 +1083,15 @@ print(json.dumps(spec,separators=(",",":")))')")
  elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
      :
  elif [ "${MTP_TOKENS:-0}" != "0" ]; then
@@ -821,7 +852,7 @@ index f3537c2..624275d 100755
  fi
  if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
      ARGS+=(--chat-template "${CHAT_TEMPLATE}")
-@@ -989,6 +1096,39 @@ fi
+@@ -989,6 +1127,39 @@ fi
  if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
      python3 /opt/glm53/patch_xgrammar_termination.py
  fi
@@ -861,7 +892,7 @@ index f3537c2..624275d 100755
  if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
      python3 /opt/glm53/patch_kpool_tail_slotmap.py
  fi
-@@ -1028,6 +1168,19 @@ launch_cluster() {
+@@ -1028,6 +1199,19 @@ launch_cluster() {
      scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
      [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
      scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
@@ -881,7 +912,7 @@ index f3537c2..624275d 100755
      [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
      scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
  
-@@ -1053,6 +1206,21 @@ launch_cluster() {
+@@ -1053,6 +1237,21 @@ launch_cluster() {
          -e VLLM_CACHE_ROOT=/root/.cache/vllm
          -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
          -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
@@ -903,7 +934,7 @@ index f3537c2..624275d 100755
          -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
          -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
          -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
-@@ -1093,10 +1261,15 @@ launch_cluster() {
+@@ -1093,10 +1292,15 @@ launch_cluster() {
      local v
      for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
               MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
@@ -920,7 +951,7 @@ index f3537c2..624275d 100755
               ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
          serve_env+=" -e $v='${!v:-}'"
      done
-@@ -1124,6 +1297,19 @@ launch_cluster() {
+@@ -1124,6 +1328,19 @@ launch_cluster() {
          -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
          -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
          -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
@@ -940,7 +971,7 @@ index f3537c2..624275d 100755
          -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
          -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
          -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
-@@ -1155,6 +1341,20 @@ launch_cluster() {
+@@ -1155,6 +1372,20 @@ launch_cluster() {
          -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
          -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
          -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
@@ -961,7 +992,7 @@ index f3537c2..624275d 100755
          -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
          -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
          -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
-@@ -1175,6 +1375,7 @@ launch_cluster() {
+@@ -1175,6 +1406,7 @@ launch_cluster() {
          -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
          -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" -e MTP_TOKENS="$MTP_TOKENS" \
          -e SPEC_METHOD="$SPEC_METHOD" \
@@ -969,12 +1000,15 @@ index f3537c2..624275d 100755
          -e DFLASH_TOKENS="${DFLASH_TOKENS:-7}" \
          -e DFLASH_MODEL_DIR="${DFLASH_MODEL_DIR:-}" \
          -e DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP:-}" \
-@@ -1332,7 +1533,13 @@ start() {
+@@ -1332,11 +1564,21 @@ start() {
      log "config: image=${IMAGE} tp=${TP} nnodes=${NNODES} quant=${QUANTIZATION} spec=${SPEC_METHOD} mtp=${MTP_TOKENS} dflash_k=${DFLASH_TOKENS} max-len=${MAX_MODEL_LEN} gpu-util=${GPU_MEM_UTIL} kv=${KV_CACHE_DTYPE} lm-only=${LANGUAGE_MODEL_ONLY} port=${PORT}"
  
      launch_cluster
 +    postload_reclaim_watch &
++    boot_headroom_guard &
++    local guard_pid=$!
      if wait_for_health; then
++        kill "$guard_pid" 2>/dev/null || true
 +        if [ "${GLM53_POSTREADY_RECLAIM:-0}" != "0" ]; then
 +            log "post-ready reclaim: pushing ${GLM53_POSTREADY_RECLAIM} GiB of cold pages to zram on both nodes ..."
 +            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$GLM53_POSTREADY_RECLAIM" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed"
@@ -983,3 +1017,8 @@ index f3537c2..624275d 100755
          post_ready_warmup
          on_ready
          return
+     fi
++    kill "$guard_pid" 2>/dev/null || true
+     collect_failure_logs
+     echo "---- last 60 lines of head log ($LOGDIR/head.log) ----"
+     tail -n 60 "$LOGDIR/head.log" || true

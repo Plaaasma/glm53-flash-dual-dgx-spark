@@ -244,6 +244,8 @@ GLM53_POSTLOAD_RECLAIM="${GLM53_POSTLOAD_RECLAIM:-0}"
 # Second reclaim once the API is up (covers the API server + engine pages
 # that were touched during startup; 0 = off).
 GLM53_POSTREADY_RECLAIM="${GLM53_POSTREADY_RECLAIM:-0}"
+# Boot-time headroom guard (host side): reclaim 2 GiB on a node whose MemAvailable drops under this many MiB
+GLM53_BOOT_GUARD_MIB="${GLM53_BOOT_GUARD_MIB:-2500}"
 # In-engine memory maintenance period (s) and whether it calls torch.cuda.empty_cache()
 GLM53_MEM_MAINT_S="${GLM53_MEM_MAINT_S:-600}"
 GLM53_MEM_MAINT_EMPTY_CACHE="${GLM53_MEM_MAINT_EMPTY_CACHE:-1}"
@@ -355,21 +357,50 @@ banner() {
 worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
 
 postload_reclaim_watch() {
-    # Runs in the background from start(): waits for the head to finish
-    # loading weights, then reclaims cold pages from both serving containers
+    # Runs in the background from start(): as soon as the first weight pass has
+    # landed, reclaims cold pages from both serving containers IN PARALLEL
     # (root helper /usr/local/sbin/glm53-reclaim, NOPASSWD via sudoers.d).
+    # Boot 14 (2026-09-08) lost the race when this waited for "Model loading
+    # took" and ran the head first: the worker tripped its watchdog 10 s later
+    # while the head reclaim (9 s) was still running.
     local n="${GLM53_POSTLOAD_RECLAIM:-0}" i
     [ "$n" != "0" ] || return 0
     for i in $(seq 1 600); do
-        if docker logs "$CONTAINER_HEAD" 2>&1 | grep -aq "Model loading took"; then
-            log "post-load reclaim: pushing ${n} GiB of cold pages to zram on both nodes ..."
-            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$n" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed"
-            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$n'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed"
+        if docker logs "$CONTAINER_HEAD" 2>&1 | grep -aq "Loading weights took\|Model loading took"; then
+            log "post-load reclaim: pushing ${n} GiB of cold pages to zram on both nodes (parallel) ..."
+            ( sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$n" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed" ) &
+            ( worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$n'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed" ) &
+            wait
             return 0
         fi
         sleep 2
     done
-    warn "post-load reclaim: never saw 'Model loading took' — skipped"
+    warn "post-load reclaim: never saw 'Loading weights took' — skipped"
+}
+
+boot_headroom_guard() {
+    # Runs in the background from start() until the API is healthy: if either
+    # node's MemAvailable drops under GLM53_BOOT_GUARD_MIB (default 2500) during
+    # load / KV allocation / graph capture, reclaim 2 GiB there (at most every
+    # 20 s per node). The watchdog kills at 750 MiB; this keeps boots away from it.
+    local thr="${GLM53_BOOT_GUARD_MIB:-2500}" last_h=0 last_w=0 now h w
+    [ "$thr" != "0" ] || return 0
+    while true; do
+        now=$(date +%s)
+        h=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
+        w=$(worker_ssh "awk '/MemAvailable/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 999999)
+        if [ "${h:-999999}" -lt "$thr" ] && [ $((now - last_h)) -gt 20 ]; then
+            log "boot guard: head MemAvailable ${h} MiB < ${thr} — reclaiming 2 GiB"
+            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" 2 2>&1 | sed 's/^/    head:   /' || true
+            last_h=$now
+        fi
+        if [ "${w:-999999}" -lt "$thr" ] && [ $((now - last_w)) -gt 20 ]; then
+            log "boot guard: worker MemAvailable ${w} MiB < ${thr} — reclaiming 2 GiB"
+            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' 2" 2>&1 | sed 's/^/    worker: /' || true
+            last_w=$now
+        fi
+        sleep 2
+    done
 }
 
 usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -1534,7 +1565,10 @@ start() {
 
     launch_cluster
     postload_reclaim_watch &
+    boot_headroom_guard &
+    local guard_pid=$!
     if wait_for_health; then
+        kill "$guard_pid" 2>/dev/null || true
         if [ "${GLM53_POSTREADY_RECLAIM:-0}" != "0" ]; then
             log "post-ready reclaim: pushing ${GLM53_POSTREADY_RECLAIM} GiB of cold pages to zram on both nodes ..."
             sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$GLM53_POSTREADY_RECLAIM" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed"
@@ -1544,6 +1578,7 @@ start() {
         on_ready
         return
     fi
+    kill "$guard_pid" 2>/dev/null || true
     collect_failure_logs
     echo "---- last 60 lines of head log ($LOGDIR/head.log) ----"
     tail -n 60 "$LOGDIR/head.log" || true

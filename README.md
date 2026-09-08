@@ -94,6 +94,14 @@ cgroup's `memory.reclaim`; `start.sh` calls it right after weights load
 (`GLM53_POSTREADY_RECLAIM=3`). `env.example` enables all of it; set
 `--load-format` back to `auto` and the reclaim knobs to 0 to use the stock loader.
 
+**Boot-time headroom.** `start.sh` now fires the post-load reclaim at the first
+`Loading weights took` line and runs both nodes in parallel, and a boot guard
+polls MemAvailable on both nodes every 2 s until the API is healthy, reclaiming
+2 GiB on any node that drops under `GLM53_BOOT_GUARD_MIB` (2500). Boot 14 lost
+the old head-then-worker sequence by ~10 s and the worker's watchdog killed it
+mid-capture; boot 15 with the guard saw both nodes dip (worker 2.45 GiB, head
+1.56 GiB) and survived.
+
 **Long-running headroom.** The post-boot headroom is not permanent: over ~14 h
 of deep-context serving both nodes crept up ~0.17 GiB/h (reclaimed cold pages
 fault back in, allocator slack accumulates, other host processes grow) until
