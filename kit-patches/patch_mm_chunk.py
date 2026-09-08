@@ -106,12 +106,16 @@ METHOD = '''    def _glm53_apply_hf_processor_chunked(  # [glm53-mm-chunk]
                     tokenization_kwargs=tokenization_kwargs,
                 )
             )
+        # Only multimodal fields are per-item along dim 0 (batched: [n, ...]; flat: [sum patches, ...]).
+        # Anything else in the BatchFeature comes from the dummy text (e.g. attention_mask [1, n]) and is
+        # ignored downstream by from_hf_inputs, so keep the first chunk's value instead of concatenating.
+        mm_fields = set(self._get_mm_fields_config(parts[0], hf_processor_mm_kwargs).keys())
         merged = type(parts[0])()
         for key in parts[0].keys():
             vals = [p[key] for p in parts]
-            if all(isinstance(v, _torch.Tensor) for v in vals):
+            if key in mm_fields and all(isinstance(v, _torch.Tensor) for v in vals):
                 merged[key] = _torch.cat(vals, dim=0)
-            elif all(isinstance(v, list) for v in vals):
+            elif key in mm_fields and all(isinstance(v, list) for v in vals):
                 merged[key] = [x for v in vals for x in v]
             else:
                 merged[key] = vals[0]

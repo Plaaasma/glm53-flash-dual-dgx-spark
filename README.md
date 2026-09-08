@@ -153,7 +153,15 @@ token back to that point and forces a re-prefill of everything after it; in a 33
    of 32 images costs 0.3 s and no memory. The `shm` cache type does NOT work on a two-node TP setup: the
    worker on the other machine tries to open the head's POSIX shm segment and dies at startup.
 
-On this box the head node has 3 to 6 GB of headroom next to the serving processes, which is why all three
+4. **Cold guard.** Chunking bounds preprocessing, but every never-seen image still costs ~60 to 100 MB across
+   the rest of the pipeline (decoded PIL image, processed tensors in the API server, the IPC copy, the engine
+   core's cache, the encoder input on the GPU): a cold 32-screenshot request dipped the head by 2.8 GB. So
+   the cap pass admits at most `GLM53_MM_COLD_MAX` (24) never-seen images per request, newest first, and keeps
+   every image it accepted before (a bounded LRU of content hashes; rejected ones stay rejected). A session's
+   first turn after a restart is capped, then it grows append-only to the limit with the prefix cache hitting
+   (`kit-patches/tests/test_mm_cap3.py`).
+
+On this box the head node has 3 to 6 GB of headroom next to the serving processes, which is why all four
 matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
 and `GLM53_MM_CAP=0` restores the upstream rejection above it.
 
