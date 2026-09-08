@@ -131,30 +131,29 @@ the same kernel (1.8 to 2.5x faster per MoE layer on prefill, decode untouched),
 and its tests. Build the extension with `nvfp4-kv/exl3-mt/build.sh`, point `EXL3MT_SO_HOST` at it (or copy it
 to `/home/liam/glm53/nvfp4-vllm/exl3-mt/`), and set `GLM53_EXL3_MT=1`. See `nvfp4-kv/exl3-mt/README.md`.
 
-### 1.7 Long multimodal sessions: truncate images instead of a 400, and bound their memory
+### 1.7 Long multimodal sessions: keep the prompt prefix stable, bound the memory
 
-Once an agent session carries more screenshots than `--limit-mm-per-prompt`, vLLM answers
-`400 At most N image(s) may be provided in one prompt`. `kit-patches/patch_mm_cap.py` keeps the newest N
-(and the newest video) and replaces older ones with one short text placeholder per message, so the text
-context is untouched and the request goes through; it logs a `[glm53-mm-cap]` warning per capped request.
-`GLM53_MM_CAP=0` restores the upstream rejection. Tests: `kit-patches/tests/test_mm_cap.py`, `test_mm_cap2.py`.
+The KV prefix cache only helps an agent session if every turn is append-only. Anything that rewrites earlier
+messages server-side (dropping an old screenshot, a placeholder whose text changes) moves the first differing
+token back to that point and forces a re-prefill of everything after it; in a 334K-token session that was
+~250K tokens per `read_image` call at the 128-token mixed rate, about 15 minutes. So the design is:
 
-Prefix-cache trap (cost one 334K-token re-prefill per `read_image` call before it was fixed): a plain
-"keep the newest N" changes the prompt every time an image is added, both because the window slides and
-because any count in the placeholder text changes, so the first difference lands wherever the oldest kept
-image was, often 100K+ tokens back. The patch therefore drops in batches of `GLM53_MM_CAP_BATCH` (8): a
-session carries 9 to 16 images, the dropped set and the constant placeholder text only change every 8
-additions, and the KV prefix cache keeps hitting in between.
+1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 48 images (about 48K tokens at
+   1024 tokens each). Above that, `kit-patches/patch_mm_cap.py` keeps the newest ones in batches of
+   `GLM53_MM_CAP_BATCH` (16) with a constant placeholder, which is a rare fallback, not the steady state.
+2. **Bound the memory instead.** The shipped image processor allows 8000 tokens per image;
+   `--mm-processor-kwargs {"max_image_tokens":1024}` caps a 1080p screenshot at 1008 tokens. Cold
+   preprocessing costs ~95 MB of host RAM per image (measured with vLLM's own processor) and upstream hands
+   all of a request's uncached images to the HF processor in one call, so `kit-patches/patch_mm_chunk.py`
+   runs it in chunks of `GLM53_MM_CHUNK` (4) images: 32 cold images peak at 1.2 GB instead of 3.2 GB, with
+   byte-identical outputs (`kit-patches/tests/test_mm_chunk.py`).
+3. **Cache repeated images once.** `--mm-processor-cache-type shm --mm-processor-cache-gb 1` keeps processed
+   images in one shared-memory cache (no per-process mirror), so a turn that adds one screenshot preprocesses
+   one image and ships the rest as hashes; a warm repeat of 32 images costs 0.3 s and no memory.
 
-The memory side matters more than the limit on this box. The shipped image processor allows 8000 tokens per
-image, so a 1920x1080 screenshot becomes 2691 tokens and costs ~200 MB of host RAM while it is preprocessed
-(measured with vLLM's own processor), and the default multimodal processor cache keeps 4 GiB per process
-(API server and engine core). A cold 32-screenshot session therefore needs ~6.5 GB on a head node that has
-3 to 5 GB of headroom: it killed the head 3 s into prefill. The settings in `env.example` bound it:
-`--mm-processor-kwargs {"max_image_tokens":1024}` (1008 tokens per 1080p screenshot, still readable),
-`--mm-processor-cache-gb 0` (images are re-preprocessed each turn, ~50 ms each; the KV prefix cache still
-makes repeated turns fast), and 16 images kept. Measured after the change: 16 cold 1080p screenshots in one
-request dip the head by 2.5 GB during preprocessing and are reused, not accumulated, on the next request.
+On this box the head node has 3 to 6 GB of headroom next to the serving processes, which is why all three
+matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
+and `GLM53_MM_CAP=0` restores the upstream rejection above it.
 
 ## 2. Get the kit and apply the patches
 
