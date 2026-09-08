@@ -108,6 +108,34 @@ def read_disk():
     return {"total_gib": round(total, 1), "used_gib": round(total - free, 1)}
 
 
+# Watched host processes (RSS in MiB, summed over all processes with that comm). engined = Liam's
+# claustro-engined-arena.service on the worker; he capped it at 4 GB (2026-09-08) and wants to see it.
+WATCH_PROCS = ("engined",)
+
+
+def read_procs():
+    out = {}
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    comm = f.read().strip()
+                if comm not in WATCH_PROCS:
+                    continue
+                with open(f"/proc/{pid}/status") as f:
+                    for ln in f:
+                        if ln.startswith("VmRSS:"):
+                            out[comm] = out.get(comm, 0) + int(ln.split()[1]) // 1024
+                            break
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
 def collect():
     now = time.time()
     with _lock:
@@ -121,6 +149,7 @@ def collect():
             "gpu": gpu, "mem": read_mem(), "cpu_pct": read_cpu_pct(),
             "net": read_net(), "disk": read_disk(),
             "load1": round(os.getloadavg()[0], 2),
+            "procs": read_procs(),
             # Age of the GPU sample. None = never got one since start.
             "gpu_age_s": None if gpu_t == 0.0 else round(now - gpu_t, 1),
         }

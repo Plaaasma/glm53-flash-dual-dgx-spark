@@ -96,6 +96,7 @@ body{
 .meter.hot .fl{background:var(--coral)}
 .meter.mid .fl{background:var(--gold)}
 .nfoot{font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost);margin-top:6px}
+.nfoot.alert{color:#ff6b6b;font-weight:700}
 .savebox select{
   background:var(--ink);border:1px solid var(--line2);color:var(--mut);border-radius:3px;
   font:500 11px 'IBM Plex Mono',monospace;padding:2px 5px;cursor:pointer;
@@ -441,8 +442,12 @@ function renderRail(){
     meter(`m_${k}_gpu`, n.gpu.util, 100, v=>Math.round(v)+"%", 101, 85);
     meter(`m_${k}_mem`, n.mem.used_gib, n.mem.total_gib||121.6, v=>v.toFixed(1)+"G", 120.9, 120.0);
     meter(`m_${k}_tmp`, n.gpu.temp, 95, v=>Math.round(v)+"°", 82, 74);
+    const eng = n.procs && n.procs.engined != null ? n.procs.engined : null;   // MiB, worker only (Liam's cap: 4 GB)
+    const engOver = eng != null && eng > 4096;
     $(`i_${k}`).textContent =
-      `${Math.round(n.gpu.power??0)} W · ${r[k+"_net"]!=null?fmtN(r[k+"_net"]):"—"} MB/s · cpu ${Math.round(n.cpu_pct??0)}%`;
+      `${Math.round(n.gpu.power??0)} W · ${r[k+"_net"]!=null?fmtN(r[k+"_net"]):"—"} MB/s · cpu ${Math.round(n.cpu_pct??0)}%` +
+      (eng != null ? ` · engined ${(eng/1024).toFixed(2)} GB${engOver ? " ⚠ OVER 4 GB CAP" : ""}` : "");
+    $(`i_${k}`).classList.toggle("alert", engOver);
   }
 }
 function meter(id, v, max, f, hot, mid){
