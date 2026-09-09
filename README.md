@@ -167,6 +167,22 @@ On this box the head node has 3 to 6 GB of headroom next to the serving processe
 matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
 and `GLM53_MM_CAP=0` restores the upstream rejection above it.
 
+### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
+
+The engine reports a 2.15M-token KV cache, but on this hybrid model that is one group's view. vLLM sets the
+attention block to 7936 tokens so its page equals the KDA state page, and the block pool is a single set of
+~310 page IDs shared by the MLA group and the three KDA groups. With prefix caching in `align` mode and no
+retention interval, every 7936-token page of a conversation leaves one cached MLA page plus one cached KDA
+state page per KDA group in the LRU queue: four IDs per page, so the cache holds only ~600K conversation
+tokens before the least recently used session is evicted. Observed: a 417K-token session plus a 216K-token
+session, and the second went cold after 38 idle minutes although "kv usage" showed 32%.
+
+`VLLM_PREFIX_CACHE_RETENTION_INTERVAL=63488` keeps a KDA checkpoint every 8 pages instead of every page
+(the state at each prompt's end is always kept, so follow-up turns still hit in full); cost per conversation
+page drops to ~1.4 IDs and the cache holds ~1.7M tokens. The only thing that gets slower is a partial-prefix
+hit (a branch, or a cancelled prefill resuming), which falls back to the last checkpoint, up to 63K tokens
+back. The dashboard's KV panels now show the pool in page IDs: in use, cached, free.
+
 ## 2. Get the kit and apply the patches
 
 ```bash

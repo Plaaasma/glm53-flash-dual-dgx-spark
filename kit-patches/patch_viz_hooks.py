@@ -107,9 +107,24 @@ def _glm53_viz_sched(sched, scheduler_output):  ''' + MARK + ''' viz-sched
                          "prompt": int(r.num_prompt_tokens), "total": int(r.num_tokens),
                          "age": round(time.time() - float(r.arrival_time), 1),
                          "sched": int(sched_tok.get(r.request_id, 0))})
+        # Pool accounting in block IDs: the hybrid layout shares one pool of page IDs between the MLA group and
+        # the KDA groups, so "usage" (running requests) hides how full the prefix cache is. cached = evictable
+        # blocks that still carry a hash; free = blocks without a hash (never used or reusable).
+        pool = {}
+        try:
+            bp = sched.kv_cache_manager.block_pool
+            n_free_total = int(bp.get_num_free_blocks())
+            n_cached = int(len(bp.cached_block_hash_to_block))
+            pool = {"blocks_total": int(getattr(bp, "num_gpu_blocks", nb) or nb), "blocks_cached": n_cached,
+                    "blocks_free": max(0, n_free_total - n_cached), "blocks_evictable": n_free_total}
+            kc = getattr(sched, "kv_cache_config", None) or getattr(sched.kv_cache_manager, "kv_cache_config", None)
+            if kc is not None:
+                pool["groups"] = len(kc.kv_cache_groups)
+        except Exception:
+            pass
         frame = {"kind": "sched", "ts": time.time(), "usage": float(sched.kv_cache_manager.usage),
                  "pool_tokens": int(nb) * int(getattr(sched, "block_size", 0) or 0),
-                 "waiting": len(sched.waiting), "reqs": reqs}
+                 "waiting": len(sched.waiting), "reqs": reqs, **pool}
         sock.sendto(json.dumps(frame).encode(), (host, int(port)))
     except Exception:
         pass

@@ -260,6 +260,9 @@ GLM53_MM_CAP="${GLM53_MM_CAP:-1}"
 GLM53_MM_CAP_BATCH="${GLM53_MM_CAP_BATCH:-16}"
 # Never-seen images admitted per request (cold guard; previously accepted images are always kept)
 GLM53_MM_COLD_MAX="${GLM53_MM_COLD_MAX:-24}"
+# Mamba/KDA prefix-cache checkpoint spacing in tokens (vLLM env). Empty = dense = one cached state page per 7936-token page
+# per KDA group (3 groups) -> the 310-page pool caches only ~600K conversation tokens. 63488 = every 8 pages.
+VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-}"
 # HF image preprocessing chunk (images per HF call; bounds the host-memory peak of cold many-image requests)
 GLM53_MM_CHUNK="${GLM53_MM_CHUNK:-4}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
@@ -1265,6 +1268,7 @@ launch_cluster() {
         -e "GLM53_MM_CAP=$GLM53_MM_CAP"
         -e "GLM53_MM_CAP_BATCH=$GLM53_MM_CAP_BATCH"
         -e "GLM53_MM_COLD_MAX=$GLM53_MM_COLD_MAX"
+        $( [ -n "$VLLM_PREFIX_CACHE_RETENTION_INTERVAL" ] && echo "-e VLLM_PREFIX_CACHE_RETENTION_INTERVAL=$VLLM_PREFIX_CACHE_RETENTION_INTERVAL" ) \
         -e "GLM53_MM_CHUNK=$GLM53_MM_CHUNK"
         -e "GLM53_IT_LOCAL_READS=$GLM53_IT_LOCAL_READS"
         -e "GLM53_LOAD_DIAG=$GLM53_LOAD_DIAG"

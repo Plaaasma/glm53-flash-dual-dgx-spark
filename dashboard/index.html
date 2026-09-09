@@ -741,7 +741,7 @@ function drawKV(){
   if (lines.length){ ctx.font = "600 11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; const lw = Math.max(...lines.map(l=>ctx.measureText(l[1]).width)) + 26, lh = 15;
     ctx.fillStyle = "rgba(11,13,16,0.82)"; ctx.fillRect(6, 6, lw, lines.length*lh + 8);
     lines.forEach(([col, txt], i)=>{ ctx.fillStyle = col; ctx.fillRect(12, 12 + i*lh, 8, 8); ctx.fillStyle = "#dfe6ee"; ctx.fillText(txt, 26, 20 + i*lh); }); }
-  $("kv_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting`;
+  $("kv_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s);
   const kvh = $("cv_kv").parentElement.querySelector("h4"); if (kvh) kvh.textContent = `kv pool — ${(pool/1e6).toFixed(2)}M tokens`;
 }
 function gauge(ctx,x,y,r,v,max,label,unit,color){
@@ -931,6 +931,10 @@ function drawTerrain(){
   o.r.render(o.s, o.c);
 }
 /* kv rack: requests as rows of blocks */
+// Pool occupancy in page IDs (hybrid layout: MLA + KDA groups share one pool). "cached" pages are the prefix
+// cache; when free hits 0 the next prefill evicts the least recently used session.
+function poolText(s){ if (s.blocks_total == null) return ""; const inuse = s.blocks_total - (s.blocks_evictable ?? 0);
+  return ` · pool ${s.blocks_total} pages: ${inuse} in use · ${s.blocks_cached ?? "?"} cached · ${s.blocks_free ?? "?"} free${s.groups ? ` · ${s.groups} groups` : ""}`; }
 const fmtK = v => v >= 1e6 ? (v/1e6).toFixed(2)+"M" : v >= 1e3 ? Math.round(v/1e3)+"K" : String(v);
 function reqLabel(r){ return r.computed < r.prompt ? `${r.id} · ${fmtK(r.computed)}/${fmtK(r.prompt)} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}%` : `${r.id} · ${fmtK(r.total)} ctx · generating`; }
 function labelSprite(){ const cv = document.createElement("canvas"); cv.width = 512; cv.height = 64; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
@@ -964,7 +968,7 @@ function drawKV3(){
         const bar = document.createElement("span"); bar.className = "bar"; const fill = document.createElement("span"); fill.className = "fill"; fill.style.background = pal[k%8];
         fill.style.width = (r.computed < r.prompt ? Math.round(100*r.computed/Math.max(r.prompt,1)) : 100) + "%"; bar.appendChild(fill);
         row.append(sw, tx, bar); lg.appendChild(row); }); lg.hidden = reqs.length === 0; } }
-    $("kv3_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting · 1 block ≈ ${Math.round(pool/384/1000)}K tokens`; o.dirty=false; }
+    $("kv3_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); o.dirty=false; }
   o.r.render(o.s, o.c);
 }
 let init3done = false;
