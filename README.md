@@ -102,6 +102,16 @@ the old head-then-worker sequence by ~10 s and the worker's watchdog killed it
 mid-capture; boot 15 with the guard saw both nodes dip (worker 2.45 GiB, head
 1.56 GiB) and survived.
 
+**Runtime headroom guard.** Alongside the 20-minute reclaim, a one-minute cron on each node reclaims 2 GiB
+from the vLLM container whenever MemAvailable drops under 2.5 GiB:
+```bash
+* * * * * [ $(awk "/MemAvailable/{print int(\$2/1024)}" /proc/meminfo) -lt 2500 ] && /usr/local/sbin/glm53-reclaim glm53-exl3-head 2 >> /var/tmp/glm53-reclaim.log 2>&1
+```
+It exists because a 468K-token session prefilling with uncapped 2048-token chunks drained the head from 3.4 GiB
+to the watchdog line in under 15 minutes (the sparse-MLA indexer's per-step scratch scales with chunk x context).
+The in-engine allocator maintenance now runs every 60 s (`GLM53_MEM_MAINT_S=60`), the multimodal processor
+cache is 0.5 GiB and the cold-image budget 16, all to keep the head's structural headroom (~3.5 GiB) usable.
+
 **Long-running headroom.** The post-boot headroom is not permanent: over ~14 h
 of deep-context serving both nodes crept up ~0.17 GiB/h (reclaimed cold pages
 fault back in, allocator slack accumulates, other host processes grow) until
