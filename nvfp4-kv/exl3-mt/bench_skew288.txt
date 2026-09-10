@@ -1,0 +1,10 @@
+tokens 2044 x top8 over 288 experts: rows/expert min 15 mean 57 max 566; experts >192 rows: 8
+correctness (skewed, id order): max rel diff 3.4e-04
+upstream fused, all experts (big temps)          74.18    11.1
+vLLM today: fused<=192 + reconstruct/cuBLAS fat     75.14    11.0
+M-tiled v8, expert id order                      37.94    21.7
+M-tiled v5 m64_k16_n256                     id-order    43.45 ms   largest-first    40.05 ms
+M-tiled v6 smemB_m128_k32_n128              id-order    48.68 ms   largest-first    49.72 ms
+M-tiled v7 smemB_m256_k32_n128              id-order    65.42 ms   largest-first    65.45 ms
+M-tiled v8 auto (<=96: m64 | <=160: smemB m128 | else smemB m256) id-order    38.47 ms   largest-first    49.15 ms
+upstream fused                              id-order    72.60 ms   largest-first    77.13 ms

@@ -60,6 +60,23 @@ difference 3e-4.
 Run each with `docker run --rm --runtime=nvidia --memory=5g -v $PWD:/w -w /w --entrypoint python3 <image> test_x.py`
 (the memory cap keeps a runaway away from the host watchdog line when a server is live on the same node).
 
+## Shared-memory-B variants and the auto kernel (2026-09-10)
+
+Variants 6 and 7 decode every 16x16 trellis tile once per block into shared memory (fp16, `[n][k]` with a padded
+row stride) and let eight warps consume it through `ldmatrix.x2` against their own 16- or 32-row tiles. At 128+
+rows per expert they reach 33 to 39 TFLOPS, the dense-cuBLAS ceiling on this GPU, but they waste MMA work on
+padding for small experts. Variant 8 ("auto") picks the inner per expert from its row count: the 64-row M-tiled
+inner up to 96 rows, shared-memory-B with 128-row tiles up to 160, 256-row tiles above. On the real routing
+distribution (2044 tokens x top-8 over 288 experts, mean 57 rows, max 566, GPU idle):
+
+| path | ms per layer |
+|---|---|
+| vLLM today (fused <=192 rows + reconstruct/cuBLAS) | 75.1 |
+| variant 5 (m64) | 43.5 |
+| variant 8 (auto) | 38.0 |
+
+`bench_rows_idle.txt` and `bench_skew288.txt` are the idle-GPU runs. Shipped default: `GLM53_EXL3_MT_VARIANT=8`.
+
 ## Next step (not built)
 
 The kernel is still decode-bound at ~10 TFLOPS. The remaining 2x is a Marlin-style restructuring: decode each

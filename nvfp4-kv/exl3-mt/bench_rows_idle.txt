@@ -1,0 +1,37 @@
+experts 32, concurrency 6, temps rows 1024, variants: ['m16_k32_n256 (upstream shape)', 'm32_k32_n256', 'm64_k32_n128', 'm64_k32_n256', 'm128_k16_n128', 'm64_k16_n256', 'smemB_m128_k32_n128', 'smemB_m256_k32_n128']
+
+== correctness vs upstream exl3_moe (max |diff| / max |ref|)
+rows/expert    1: ref max 6069.075 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.1e-04 v5 3.1e-04 v6 3.1e-04 v7 3.1e-04
+rows/expert    5: ref max 6432.596 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.7e-04 v5 3.7e-04 v6 3.7e-04 v7 3.7e-04
+rows/expert   16: ref max 7001.389 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.5e-04 v5 3.5e-04 v6 3.5e-04 v7 3.5e-04
+rows/expert   17: ref max 6323.215 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 4.1e-04 v5 4.1e-04 v6 4.1e-04 v7 4.1e-04
+rows/expert   64: ref max 6469.491 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 4.1e-04 v5 4.1e-04 v6 4.1e-04 v7 4.1e-04
+rows/expert  100: ref max 6427.222 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 4.0e-04 v5 4.0e-04 v6 4.0e-04 v7 4.0e-04
+rows/expert  192: ref max 6646.713 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.8e-04 v5 3.8e-04 v6 3.8e-04 v7 3.8e-04
+rows/expert  300: ref max 7376.149 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.5e-04 v5 3.5e-04 v6 3.5e-04 v7 3.5e-04
+rows/expert  600: ref max 7024.638 | v0 0.0e+00 v1 0.0e+00 v2 0.0e+00 v3 0.0e+00 v4 3.9e-04 v5 3.9e-04 v6 3.9e-04 v7 3.9e-04
+
+== time per layer-call (ms) for N_EXP experts, all with the same row count; last column = achieved TFLOPS of best
+ rows  tokens  upstream       v0       v1       v2       v3       v4       v5       v6       v7    best  speedup  TFLOPS
+    4     128      2.19     2.05     4.33     4.71     9.32    11.89     3.77     4.68     7.87      v0     1.07x     3.1
+    8     256      2.71     2.30     2.82     4.70    10.46    10.25     3.43     4.35     6.58      v0     1.18x     5.6
+   16     512      3.26     2.73     2.91     4.84     9.89     9.36     4.40     4.76     7.75      v0     1.19x     9.4
+   32    1024      4.85     4.81     3.37     8.26    13.73    11.36     3.80     4.73     6.93      v1     1.44x    15.3
+   57    1824      9.91     9.59     6.08     6.76     9.43    11.15     3.49     5.00     8.28      v5     2.84x    26.3
+   64    2048      8.04     8.55     7.79     9.02     9.77    12.31     4.19     5.09     8.73      v5     1.92x    24.6
+   96    3072     12.59    12.33    11.93    13.02    19.63    11.87     6.78     9.19    14.48      v5     1.86x    22.8
+  128    4096     20.58    18.49    14.50    13.16    19.37    13.30     7.73     6.06    11.23      v6     3.40x    34.0
+  192    6144     28.28    23.58    22.93    18.87    27.27    25.27    18.22    13.56     9.40      v7     3.01x    32.9
+  256    8192     35.52    34.06    32.95    25.81    42.59    23.33    20.55    14.74    10.65      v7     3.34x    38.7
+  512   16384     69.22    70.05    82.20    52.61    76.02    47.17    41.76    34.52    25.52      v7     2.71x    32.3
+ 1024   32768    145.47   148.68   124.22   104.24   164.65    95.76    71.69    67.40    50.12      v7     2.90x    32.9
+
+== dense fp16 cuBLAS reference (per expert, weights already fp16): the ceiling a perfect fused kernel would approach
+  rows    16:    6.42 ms for 32 experts  (  4.0 TFLOPS)
+  rows    64:    6.14 ms for 32 experts  ( 16.8 TFLOPS)
+  rows   128:    6.35 ms for 32 experts  ( 32.4 TFLOPS)
+  rows   256:   12.63 ms for 32 experts  ( 32.6 TFLOPS)
+  rows   512:   15.64 ms for 32 experts  ( 52.7 TFLOPS)
+  rows  1024:   25.56 ms for 32 experts  ( 64.5 TFLOPS)
+
+footprint: reserved 4146 MiB

@@ -513,22 +513,419 @@ void exl3_moe_mt_kernel(EXL3_MOE_KERNEL_ARGS)
     }
 }
 
+
+// ----------------------------------------------------------------------------------------------------------------
+// Variant 2 ("smem-B"): each block decodes every 16x16 trellis tile of the current K32 x N128 slab ONCE into
+// shared memory (fp16, [n][k] layout, padded row stride so ldmatrix is conflict-free) and 8 warps each own a
+// 16*TBW-row M tile, reading B fragments with ldmatrix.x2. Decode cost per block per stage is fixed (two dq8
+// per thread) while MMA work scales with TBW*8 m16 tiles, so decode is amortised 2x (TBW=1) or 4x (TBW=2)
+// better than variant m64_k16_n256. 256 threads, no split-K inside the block (the two k16 halves run
+// sequentially), so no shared-memory reduction is needed.
+
+__device__ __forceinline__ void ldsm2(FragB& frag_b, const void* smem_ptr)
+{
+    uint32_t* b = reinterpret_cast<uint32_t*>(&frag_b);
+    uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(b[0]), "=r"(b[1]) : "r"(smem));
+}
+
+template<int bits, int cb, int TBW, int SH_STAGES>
+__device__ __forceinline__ void mt2_gemm_inner
+(
+    const half* __restrict__ A,
+    const uint16_t* __restrict__ B,
+    half* __restrict__ C,
+    const int size_m,
+    const int size_k,
+    const int size_n,
+    int* __restrict__ locks
+)
+{
+    constexpr int THREADS = 256, WARPS = 8;
+    constexpr int TILESIZE_M = 16 * TBW * WARPS;
+    constexpr int TILESIZE_K = 32, TILESIZE_N = 128;
+    constexpr int TILEBLOCKS_K = TILESIZE_K / 16, TILEBLOCKS_N = TILESIZE_N / 16;
+    constexpr int NFRAG = TILESIZE_N / 8;
+    constexpr int BROW = TILESIZE_K + 8;                                     // padded k stride (halfs) of decoded B
+    constexpr int TILE_U16 = 256 / 16 * bits;                                // packed uint16 per 16x16 tile
+    constexpr int sh_a_stage = TILESIZE_M * TILESIZE_K;                      // halfs
+    constexpr int sh_bp_stage = TILEBLOCKS_K * TILEBLOCKS_N * TILE_U16;      // uint16
+    constexpr int sh_bd_stage = TILESIZE_N * BROW;                           // halfs
+    constexpr int A_COLS = TILESIZE_K / 8, A_SWIZZLE_MASK = A_COLS - 1, A_SWIZZLE_SHIFT = (A_COLS <= 2) ? 2 : 1;
+    static_assert(SMEM_MAX >= SH_STAGES * (2 * sh_a_stage + 2 * sh_bp_stage + 2 * sh_bd_stage), "smem-B: insufficient shared memory");
+    static_assert(TILEBLOCKS_K * TILEBLOCKS_N == 2 * WARPS, "decode phase assumes 16 tiles per stage");
+
+    extern __shared__ half shared[];
+    half* sh_a = shared;
+    uint16_t* sh_bp = (uint16_t*) (sh_a + SH_STAGES * sh_a_stage);
+    half* sh_bd = (half*) (sh_bp + SH_STAGES * sh_bp_stage);
+
+    const int t = threadIdx.x, warp_id = t / 32, lane_id = t % 32;
+    const int tiles_k = size_k / TILESIZE_K, tiles_n = size_n / TILESIZE_N, blocks_n = tiles_n * TILEBLOCKS_N;
+    const int num_slices = gridDim.x;
+    const int slice_beg = tiles_k * tiles_n * blockIdx.x / num_slices;
+    const int slice_end = tiles_k * tiles_n * (blockIdx.x + 1) / num_slices;
+    const int slice_len = slice_end - slice_beg;
+    if (slice_len < 1) return;
+    auto index_k = [&] (int s) { return s % tiles_k; };
+    auto index_n = [&] (int s) { return s / tiles_k; };
+
+    // Pipe 0: global -> shared (A rows of this pass, packed B tiles)
+    int slice0_k = index_k(slice_beg), slice0_n = index_n(slice_beg), slice0_iters = slice_len;
+    constexpr int gl_a_stride_k = TILESIZE_K;
+    const half* gl_a_ptr = A + slice0_k * gl_a_stride_k;
+    constexpr int load_a_iters = CEIL_DIVIDE(sh_a_stage / 8, THREADS);
+    bool pred_a_gl[load_a_iters]; int load_a_gl[load_a_iters]; int load_a_sh[load_a_iters];
+    #pragma unroll
+    for (int i = 0; i < load_a_iters; ++i)
+    {
+        int idx = i * THREADS + t;
+        int k = idx % (gl_a_stride_k / 8), m = idx / (gl_a_stride_k / 8);
+        load_a_gl[i] = m * size_k / 8 + k;
+        load_a_sh[i] = m * A_COLS + (k ^ ((m >> A_SWIZZLE_SHIFT) & A_SWIZZLE_MASK));
+        pred_a_gl[i] = (m < size_m) && (m < TILESIZE_M);
+    }
+    const int gl_b_stride_k = blocks_n * TILEBLOCKS_K * TILE_U16;
+    constexpr int gl_b_stride_n = TILEBLOCKS_N * TILE_U16;
+    const uint16_t* gl_b_ptr = B + slice0_k * gl_b_stride_k + slice0_n * gl_b_stride_n;
+    constexpr int load_b_iters = CEIL_DIVIDE(sh_bp_stage / 8, THREADS);
+    bool pred_b_gl[load_b_iters]; int load_b_gl[load_b_iters];
+    #pragma unroll
+    for (int i = 0; i < load_b_iters; ++i)
+    {
+        int n = (i * THREADS + t) % (gl_b_stride_n / 8);
+        int k = (i * THREADS + t) / (gl_b_stride_n / 8);
+        load_b_gl[i] = k * (blocks_n * TILE_U16 / 8) + n;
+        pred_b_gl[i] = i * THREADS + t < sh_bp_stage / 8;
+    }
+    auto advance0 = [&] ()
+    {
+        slice0_k++; slice0_iters--;
+        if (slice0_k >= tiles_k) { slice0_k = 0; slice0_n++; gl_a_ptr = A + slice0_k * gl_a_stride_k; gl_b_ptr = B + slice0_k * gl_b_stride_k + slice0_n * gl_b_stride_n; }
+        else { gl_a_ptr += gl_a_stride_k; gl_b_ptr += gl_b_stride_k; }
+    };
+    auto async_load_gl = [&] ()
+    {
+        if (slice0_iters)
+        {
+            int stage = slice0_iters % SH_STAGES;
+            const int4* gla = (const int4*) gl_a_ptr; int4* sha = (int4*) (sh_a + stage * sh_a_stage);
+            #pragma unroll
+            for (int i = 0; i < load_a_iters; ++i) if (pred_a_gl[i]) cp_async(sha + load_a_sh[i], gla + load_a_gl[i]);
+            const int4* glb = (const int4*) gl_b_ptr; int4* shb = (int4*) (sh_bp + stage * sh_bp_stage);
+            #pragma unroll
+            for (int i = 0; i < load_b_iters; ++i) if (pred_b_gl[i]) cp_async(shb + THREADS * i + t, glb + load_b_gl[i]);
+            advance0();
+        }
+        cp_async_fence();
+    };
+
+    // Pipe 2: compute + reduction
+    int slice2_k = index_k(slice_beg), slice2_k0 = slice2_k, slice2_n = index_n(slice_beg), slice2_iters = slice_len;
+    half* gl_c_ptr = C + slice2_n * TILESIZE_N;
+    FragC frag_c[TBW][NFRAG];
+    auto clear_frag_c = [&] () {
+        #pragma unroll
+        for (int m = 0; m < TBW; ++m)
+            #pragma unroll
+            for (int j = 0; j < NFRAG; ++j) frag_c[m][j] = {};
+    };
+    auto advance2 = [&] () { slice2_k++; slice2_iters--; if (slice2_k >= tiles_k) { slice2_k = 0; slice2_k0 = 0; slice2_n++; gl_c_ptr += TILESIZE_N; } };
+
+    auto read_sum_gl = [&] () {
+        int c = (lane_id % 4) * 2;
+        #pragma unroll
+        for (int m = 0; m < TBW; ++m) {
+            int r0 = (warp_id * TBW + m) * 16 + lane_id / 4, r1 = r0 + 8;
+            #pragma unroll
+            for (int j = 0; j < NFRAG; ++j) {
+                if (r0 < size_m) { float2 v = __half22float2(*(half2*) (gl_c_ptr + r0 * size_n + j * 8 + c)); frag_c[m][j][0] += v.x; frag_c[m][j][1] += v.y; }
+                if (r1 < size_m) { float2 v = __half22float2(*(half2*) (gl_c_ptr + r1 * size_n + j * 8 + c)); frag_c[m][j][2] += v.x; frag_c[m][j][3] += v.y; }
+            }
+        }
+    };
+    auto write_sum_gl = [&] () {
+        int c = (lane_id % 4) * 2;
+        #pragma unroll
+        for (int m = 0; m < TBW; ++m) {
+            int r0 = (warp_id * TBW + m) * 16 + lane_id / 4, r1 = r0 + 8;
+            #pragma unroll
+            for (int j = 0; j < NFRAG; ++j) {
+                if (r0 < size_m) *(half2*) (gl_c_ptr + r0 * size_n + j * 8 + c) = __floats2half2_rn(frag_c[m][j][0], frag_c[m][j][1]);
+                if (r1 < size_m) *(half2*) (gl_c_ptr + r1 * size_n + j * 8 + c) = __floats2half2_rn(frag_c[m][j][2], frag_c[m][j][3]);
+            }
+        }
+    };
+    auto reduce = [&] () {
+        int lock_i = tiles_k - slice2_k - 1, lock_d = slice2_k - slice2_k0 + 1;
+        int* lock = &locks[slice2_n];
+        barrier_acquire(lock, lock_i);
+        bool first = lock_i == 0, last = lock_i + lock_d == tiles_k;
+        if (!first) read_sum_gl();
+        write_sum_gl();
+        barrier_release(lock, lock_d, last);
+        clear_frag_c();
+    };
+
+    #pragma unroll
+    for (int i = 0; i < SH_STAGES - 1; ++i) async_load_gl();
+    clear_frag_c();
+
+    while (true)
+    {
+        async_load_gl();
+        cp_async_wait<SH_STAGES - 2>();
+        __syncthreads();
+        const int slot = slice2_iters % SH_STAGES;
+        // decode this stage's 16 packed tiles into fp16 [n][k]
+        {
+            const uint32_t* bp = (const uint32_t*) (sh_bp + slot * sh_bp_stage);
+            half* bd = sh_bd + slot * sh_bd_stage;
+            #pragma unroll
+            for (int i = 0; i < 2; ++i)
+            {
+                int tile = warp_id + WARPS * i;
+                int kb = tile / TILEBLOCKS_N, nb = tile % TILEBLOCKS_N;
+                FragB f0, f1;
+                dq_dispatch<bits, cb>(bp + (kb * TILEBLOCKS_N + nb) * (TILE_U16 / 2), lane_id << 3, f0, f1);
+                int n = nb * 16 + lane_id / 4, k = kb * 16 + (lane_id % 4) * 2;
+                *(half2*) (bd + n * BROW + k) = f0[0];
+                *(half2*) (bd + n * BROW + k + 8) = f0[1];
+                *(half2*) (bd + (n + 8) * BROW + k) = f1[0];
+                *(half2*) (bd + (n + 8) * BROW + k + 8) = f1[1];
+            }
+        }
+        __syncthreads();
+        // MMA: each warp its own 16*TBW rows, all 128 columns
+        {
+            const half* a = sh_a + slot * sh_a_stage;
+            const half* bd = sh_bd + slot * sh_bd_stage;
+            const int r = (lane_id % 8) + 8 * ((lane_id / 8) % 2);
+            const int l16 = lane_id % 16;
+            #pragma unroll
+            for (int kk = 0; kk < TILEBLOCKS_K; ++kk)
+            {
+                FragA fa[TBW];
+                #pragma unroll
+                for (int m = 0; m < TBW; ++m)
+                {
+                    int R = (warp_id * TBW + m) * 16 + r;
+                    int c_sw = (lane_id / 16 + kk * 2) ^ ((R >> A_SWIZZLE_SHIFT) & A_SWIZZLE_MASK);
+                    ldsm4(fa[m], (const int4*) a + R * A_COLS + c_sw);
+                }
+                #pragma unroll
+                for (int j = 0; j < NFRAG; ++j)
+                {
+                    FragB fb;
+                    ldsm2(fb, bd + (j * 8 + (l16 % 8)) * BROW + kk * 16 + (l16 / 8) * 8);
+                    #pragma unroll
+                    for (int m = 0; m < TBW; ++m) ptx_mma_m16n8k16(fa[m], fb, frag_c[m][j]);
+                }
+            }
+        }
+        if (slice2_k == tiles_k - 1 || slice2_iters == 1) { reduce(); slice2_k0 = slice2_k + 1; }
+        advance2();
+        __syncthreads();            // everyone is done reading this slot before the next load reuses it
+        if (!slice2_iters) break;
+    }
+}
+
+template<int bits, int TBW, int SH_STAGES>
+__global__ __launch_bounds__(256)
+void exl3_moe_mt2_kernel(EXL3_MOE_KERNEL_ARGS)
+{
+    constexpr int TILESIZE_M = 16 * TBW * 8;
+    const int group_idx = blockIdx.z;
+    const int block_idx = blockIdx.x;
+    const int block_threads = 256;
+    const int group_threads = MOE_SMS_PER_EXPERT * block_threads;
+    const int warp_id = threadIdx.x / 32;
+    const int warps_per_group = group_threads / 32;
+    const int warps_per_block = block_threads / 32;
+    const int warp_idx0 = block_idx * warps_per_block + warp_id;
+
+    temp_state_g += (size_t) group_idx * max_tokens_per_expert * hidden_dim;
+    temp_state_u += (size_t) group_idx * max_tokens_per_expert * hidden_dim;
+    temp_intermediate_g += (size_t) group_idx * max_tokens_per_expert * intermediate_dim;
+    temp_intermediate_u += (size_t) group_idx * max_tokens_per_expert * intermediate_dim;
+    int* barrier_counters_sense = locks + MT_BARRIER_OFFSET;
+    locks += group_idx * MAX(hidden_dim, intermediate_dim) / 128;
+
+    int start = 0, end = 0, expert_idx_assign = 0;
+    for (int expert_idx = 0; expert_idx < num_experts; ++expert_idx)
+    {
+        start = end; end += expert_count[expert_idx];
+        int token_count = end - start;
+        if (token_count == 0) continue;
+        if (token_count > max_tokens_per_expert) continue;
+        if (expert_idx_assign++ % concurrency != group_idx) continue;
+        const uint16_t* exp_gate_trellis = gate_trellis[expert_idx]; const half* exp_gate_suh = gate_suh[expert_idx]; const half* exp_gate_svh = gate_svh[expert_idx];
+        const uint16_t* exp_up_trellis = up_trellis[expert_idx];     const half* exp_up_suh = up_suh[expert_idx];     const half* exp_up_svh = up_svh[expert_idx];
+        const uint16_t* exp_down_trellis = down_trellis[expert_idx]; const half* exp_down_suh = down_suh[expert_idx]; const half* exp_down_svh = down_svh[expert_idx];
+        {
+            const int warps_per_token = hidden_dim / 128, total_warps = token_count * warps_per_token;
+            const int64_t* top_x = token_sorted + start;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_idx = top_x[warp_idx / warps_per_token], token_off = warp_idx % warps_per_token;
+                const half* in_ptr = hidden_state + (size_t) token_idx * hidden_dim + token_off * 128;
+                had_hf_r_128_inner<true, false>(in_ptr, temp_state_g + 128 * warp_idx, exp_gate_suh + 128 * token_off, 0.088388347648f);
+                had_hf_r_128_inner<true, false>(in_ptr, temp_state_u + 128 * warp_idx, exp_up_suh + 128 * token_off, 0.088388347648f);
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+        auto gemm = [&] (const half* in_addr, half* out_addr, const uint16_t* trellis, int size_k, int size_n)
+        {
+            int size_m = token_count;
+            while (size_m > 0)
+            {
+                mt2_gemm_inner<bits, 1, TBW, SH_STAGES>(in_addr, trellis, out_addr, MIN(size_m, TILESIZE_M), size_k, size_n, locks);
+                in_addr += TILESIZE_M * size_k; out_addr += TILESIZE_M * size_n; size_m -= TILESIZE_M;
+            }
+        };
+        gemm(temp_state_g, temp_intermediate_g, exp_gate_trellis, hidden_dim, intermediate_dim);
+        gemm(temp_state_u, temp_intermediate_u, exp_up_trellis, hidden_dim, intermediate_dim);
+        group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        {
+            const int warps_per_token = intermediate_dim / 128, total_warps = token_count * warps_per_token;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_off = warp_idx % warps_per_token;
+                had_hf_r_128_guad_inner(temp_intermediate_g + 128 * warp_idx, temp_intermediate_u + 128 * warp_idx, temp_intermediate_g + 128 * warp_idx,
+                    exp_gate_svh + 128 * token_off, exp_up_svh + 128 * token_off, exp_down_suh + 128 * token_off, 0.088388347648f, act_limit, act_function);
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+        gemm(temp_intermediate_g, temp_state_g, exp_down_trellis, intermediate_dim, hidden_dim);
+        group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        {
+            const int warps_per_token = hidden_dim / 128, total_warps = token_count * warps_per_token;
+            const int64_t* top_x = token_sorted + start; const half* weights = weight_sorted + start;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_idx = top_x[warp_idx / warps_per_token]; half weight = weights[warp_idx / warps_per_token]; int token_off = warp_idx % warps_per_token;
+                float* out_ptr = output_state + (size_t) token_idx * hidden_dim + token_off * 128;
+                had_hf_r_128_d_inner(temp_state_g + 128 * warp_idx, out_ptr, exp_down_svh + 128 * token_off, 0.088388347648f * __half2float(weight));
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+    }
+}
+
+
+// ----------------------------------------------------------------------------------------------------------------
+// Variant 3 ("auto"): one 256-thread kernel that picks the GEMM tile per EXPERT from its row count, so a layer
+// whose experts range from 4 to 600 rows gets the 64-row M-tiled inner for the small ones (decode-bound, tiles
+// mostly padded otherwise) and the shared-memory-B inner with 128- or 256-row tiles for the big ones (MMA at
+// the dense-GEMM ceiling). Thresholds from the row sweep on GB10 (bench_rows.txt).
+
+template<int bits, int SMALL_MAX, int MID_MAX>
+__global__ __launch_bounds__(256)
+void exl3_moe_mt3_kernel(EXL3_MOE_KERNEL_ARGS)
+{
+    const int group_idx = blockIdx.z;
+    const int block_idx = blockIdx.x;
+    const int block_threads = 256;
+    const int group_threads = MOE_SMS_PER_EXPERT * block_threads;
+    const int warp_id = threadIdx.x / 32;
+    const int warps_per_group = group_threads / 32;
+    const int warps_per_block = block_threads / 32;
+    const int warp_idx0 = block_idx * warps_per_block + warp_id;
+
+    temp_state_g += (size_t) group_idx * max_tokens_per_expert * hidden_dim;
+    temp_state_u += (size_t) group_idx * max_tokens_per_expert * hidden_dim;
+    temp_intermediate_g += (size_t) group_idx * max_tokens_per_expert * intermediate_dim;
+    temp_intermediate_u += (size_t) group_idx * max_tokens_per_expert * intermediate_dim;
+    int* barrier_counters_sense = locks + MT_BARRIER_OFFSET;
+    locks += group_idx * MAX(hidden_dim, intermediate_dim) / 128;
+
+    int start = 0, end = 0, expert_idx_assign = 0;
+    for (int expert_idx = 0; expert_idx < num_experts; ++expert_idx)
+    {
+        start = end; end += expert_count[expert_idx];
+        int token_count = end - start;
+        if (token_count == 0) continue;
+        if (token_count > max_tokens_per_expert) continue;
+        if (expert_idx_assign++ % concurrency != group_idx) continue;
+        const uint16_t* exp_gate_trellis = gate_trellis[expert_idx]; const half* exp_gate_suh = gate_suh[expert_idx]; const half* exp_gate_svh = gate_svh[expert_idx];
+        const uint16_t* exp_up_trellis = up_trellis[expert_idx];     const half* exp_up_suh = up_suh[expert_idx];     const half* exp_up_svh = up_svh[expert_idx];
+        const uint16_t* exp_down_trellis = down_trellis[expert_idx]; const half* exp_down_suh = down_suh[expert_idx]; const half* exp_down_svh = down_svh[expert_idx];
+        {
+            const int warps_per_token = hidden_dim / 128, total_warps = token_count * warps_per_token;
+            const int64_t* top_x = token_sorted + start;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_idx = top_x[warp_idx / warps_per_token], token_off = warp_idx % warps_per_token;
+                const half* in_ptr = hidden_state + (size_t) token_idx * hidden_dim + token_off * 128;
+                had_hf_r_128_inner<true, false>(in_ptr, temp_state_g + 128 * warp_idx, exp_gate_suh + 128 * token_off, 0.088388347648f);
+                had_hf_r_128_inner<true, false>(in_ptr, temp_state_u + 128 * warp_idx, exp_up_suh + 128 * token_off, 0.088388347648f);
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+        auto gemm = [&] (const half* in_addr, half* out_addr, const uint16_t* trellis, int size_k, int size_n)
+        {
+            int size_m = token_count;
+            if (token_count <= SMALL_MAX)
+            {
+                while (size_m > 0) { mt_gemm_inner<bits, 1, 4, 16, 256, 6, 2>(in_addr, trellis, out_addr, MIN(size_m, 64), size_k, size_n, locks); in_addr += 64 * size_k; out_addr += 64 * size_n; size_m -= 64; }
+            }
+            else if (token_count <= MID_MAX)
+            {
+                while (size_m > 0) { mt2_gemm_inner<bits, 1, 1, 3>(in_addr, trellis, out_addr, MIN(size_m, 128), size_k, size_n, locks); in_addr += 128 * size_k; out_addr += 128 * size_n; size_m -= 128; }
+            }
+            else
+            {
+                while (size_m > 0) { mt2_gemm_inner<bits, 1, 2, 3>(in_addr, trellis, out_addr, MIN(size_m, 256), size_k, size_n, locks); in_addr += 256 * size_k; out_addr += 256 * size_n; size_m -= 256; }
+            }
+        };
+        gemm(temp_state_g, temp_intermediate_g, exp_gate_trellis, hidden_dim, intermediate_dim);
+        gemm(temp_state_u, temp_intermediate_u, exp_up_trellis, hidden_dim, intermediate_dim);
+        group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        {
+            const int warps_per_token = intermediate_dim / 128, total_warps = token_count * warps_per_token;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_off = warp_idx % warps_per_token;
+                had_hf_r_128_guad_inner(temp_intermediate_g + 128 * warp_idx, temp_intermediate_u + 128 * warp_idx, temp_intermediate_g + 128 * warp_idx,
+                    exp_gate_svh + 128 * token_off, exp_up_svh + 128 * token_off, exp_down_suh + 128 * token_off, 0.088388347648f, act_limit, act_function);
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+        gemm(temp_intermediate_g, temp_state_g, exp_down_trellis, intermediate_dim, hidden_dim);
+        group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        {
+            const int warps_per_token = hidden_dim / 128, total_warps = token_count * warps_per_token;
+            const int64_t* top_x = token_sorted + start; const half* weights = weight_sorted + start;
+            for (int warp_idx = warp_idx0; warp_idx < total_warps; warp_idx += warps_per_group)
+            {
+                int token_idx = top_x[warp_idx / warps_per_token]; half weight = weights[warp_idx / warps_per_token]; int token_off = warp_idx % warps_per_token;
+                float* out_ptr = output_state + (size_t) token_idx * hidden_dim + token_off * 128;
+                had_hf_r_128_d_inner(temp_state_g + 128 * warp_idx, out_ptr, exp_down_svh + 128 * token_off, 0.088388347648f * __half2float(weight));
+            }
+            group_barrier(group_idx, MOE_SMS_PER_EXPERT, barrier_counters_sense);
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------------------------------------------
 // Host side
 
 typedef void (*fp_mt_kernel) (EXL3_MOE_KERNEL_ARGS);
 
-struct MtVariant { fp_mt_kernel fn; int tbm; int tk; int tn; int sh; int fr; const char* name; };
+struct MtVariant { fp_mt_kernel fn; int tbm; int tk; int tn; int sh; int fr; const char* name; int threads; };
 
 // Variants (all 4-bit, mcg). m_tile = 16 * tbm rows per pass.
 static MtVariant g_variants[] =
 {
-    { exl3_moe_mt_kernel<4, 1, 32, 256, 3, 3>, 1, 32, 256, 3, 3, "m16_k32_n256 (upstream shape)" },
-    { exl3_moe_mt_kernel<4, 2, 32, 256, 3, 3>, 2, 32, 256, 3, 3, "m32_k32_n256" },
-    { exl3_moe_mt_kernel<4, 4, 32, 128, 3, 2>, 4, 32, 128, 3, 2, "m64_k32_n128" },
-    { exl3_moe_mt_kernel<4, 4, 32, 256, 3, 2>, 4, 32, 256, 3, 2, "m64_k32_n256" },
-    { exl3_moe_mt_kernel<4, 8, 16, 128, 6, 2>, 8, 16, 128, 6, 2, "m128_k16_n128" },
-    { exl3_moe_mt_kernel<4, 4, 16, 256, 6, 2>, 4, 16, 256, 6, 2, "m64_k16_n256" },
+    { exl3_moe_mt_kernel<4, 1, 32, 256, 3, 3>, 1, 32, 256, 3, 3, "m16_k32_n256 (upstream shape)", 0 },
+    { exl3_moe_mt_kernel<4, 2, 32, 256, 3, 3>, 2, 32, 256, 3, 3, "m32_k32_n256", 0 },
+    { exl3_moe_mt_kernel<4, 4, 32, 128, 3, 2>, 4, 32, 128, 3, 2, "m64_k32_n128", 0 },
+    { exl3_moe_mt_kernel<4, 4, 32, 256, 3, 2>, 4, 32, 256, 3, 2, "m64_k32_n256", 0 },
+    { exl3_moe_mt_kernel<4, 8, 16, 128, 6, 2>, 8, 16, 128, 6, 2, "m128_k16_n128", 0 },
+    { exl3_moe_mt_kernel<4, 4, 16, 256, 6, 2>, 4, 16, 256, 6, 2, "m64_k16_n256", 0 },
+    { exl3_moe_mt2_kernel<4, 1, 3>, 8, 32, 128, 3, 1, "smemB_m128_k32_n128", 256 },
+    { exl3_moe_mt2_kernel<4, 2, 3>, 16, 32, 128, 3, 1, "smemB_m256_k32_n128", 256 },
+    { exl3_moe_mt3_kernel<4, 96, 160>, 16, 32, 128, 3, 1, "auto (<=96: m64 | <=160: smemB m128 | else smemB m256)", 256 },
 };
 static const int g_num_variants = sizeof(g_variants) / sizeof(g_variants[0]);
 static std::set<void*> g_attr_set;
@@ -610,7 +1007,7 @@ void exl3_moe_mt
     const MtVariant& v = g_variants[variant];
     TORCH_CHECK(hidden_dim % v.tn == 0 && intermediate_dim % v.tn == 0, "dims vs TILESIZE_N");
     TORCH_CHECK(hidden_dim % v.tk == 0 && intermediate_dim % v.tk == 0, "dims vs TILESIZE_K");
-    int block_dim = EXL3_GEMM_BASE_THREADS * v.tk / 16;
+    int block_dim = v.threads ? v.threads : EXL3_GEMM_BASE_THREADS * v.tk / 16;
     dim3 grid_dim(MOE_SMS_PER_EXPERT, 1, concurrency);
 
     if (g_attr_set.find((void*) v.fn) == g_attr_set.end())
