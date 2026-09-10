@@ -227,6 +227,16 @@ def main() -> int:
         text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
     else:
         print(f"{P.name}: {MARK} present — core seams kept")
+    # Upgrade a baked-in older policy helper in place (the image ships v1; "ladder" arrived 2026-09-10).
+    if "def _glm53_mixed_prefill_policy(" in text and '"ladder"' not in text:
+        import re as _re
+        start = text.index("def _glm53_mixed_prefill_policy(")
+        m = _re.compile(r"\n(?=(def |class |from |import |@))").search(text, start + 1)
+        if m is None:
+            raise SystemExit(f"{P}: cannot find the end of the old policy helper")
+        new_fn = HELPER.strip("\n") + "\n"
+        text = text[:start] + new_fn + text[m.start() + 1:]
+        print(f"{P.name}: policy helper upgraded in place (ladder mode available)")
     if "prefill pass" not in text:
         if "[glm53-decode-floor] dbg" in text:
             # v2 dbg seams present: upgrade the cap-capture block in place

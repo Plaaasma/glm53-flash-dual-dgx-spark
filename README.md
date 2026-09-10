@@ -174,6 +174,10 @@ and `GLM53_MM_CAP=0` restores the upstream rejection above it.
   mixed-prefill chunk by how many other requests are decoding. A mixed step reads the whole expert set once
   whatever the chunk, so a 1024-token chunk next to one decoding stream prefills ~8x faster than the old fixed
   128 at the cost of longer gaps in that stream's output; with five or more decoders it falls back to 128.
+  Note: the serving image ships an older copy of the policy helper baked in; the patcher now upgrades it in place
+  at boot. Before that fix, `ladder` fell through the old helper as "unparseable" and mixed prefill ran with NO
+  cap (full 2048-token chunks next to decoders): the fastest possible prefill, ~800 tok/s next to one decoder,
+  with ~2.5 s gaps in that decoder's output.
 
 ### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
 
