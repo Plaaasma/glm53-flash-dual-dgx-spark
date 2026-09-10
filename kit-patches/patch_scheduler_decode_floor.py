@@ -76,8 +76,24 @@ def _glm53_mixed_prefill_policy(running, current):
             continue
         if r.num_computed_tokens >= r.num_prompt_tokens:
             n_decoding += 1
+    # Context-aware chunk cap (2026-09-10): the sparse-MLA indexer's per-step scratch scales with
+    # chunk x context (~1 GB at 2048 x 588K), which is the whole memory margin of the head node.
+    # Keep chunk * context <= GLM53_PREFILL_CHUNK_CTX_BUDGET (token^2, default 3e8 ~ 300 MB of fp8
+    # logits) once the context is deep; per-token MoE cost is flat above ~256-token chunks so this
+    # costs little throughput. Applies with or without decoding peers.
+    ctx_cap = None
+    try:
+        budget = int(float(os.environ.get("GLM53_PREFILL_CHUNK_CTX_BUDGET", "300000000")))
+    except ValueError:
+        budget = 300000000
+    if budget > 0:
+        ctx = int(getattr(current, "num_computed_tokens", 0) or 0)
+        if ctx > 0:
+            c = budget // ctx
+            if c < 2048:
+                ctx_cap = max(256, (c // 128) * 128)
     if n_decoding == 0:
-        return None
+        return ctx_cap
     if raw == "ladder":
         # Adaptive cap by the number of decoding peers (2026-09-10, max prefill speed): every mixed step
         # reads the whole expert set once whatever the chunk, so bigger chunks are almost free for prefill
@@ -96,17 +112,19 @@ def _glm53_mixed_prefill_policy(running, current):
             else:
                 try:
                     if n_decoding <= int(k):
-                        return cap_v
+                        return min(cap_v, ctx_cap) if ctx_cap else cap_v
                 except ValueError:
                     continue
-        return default_cap
+        return min(default_cap, ctx_cap) if ctx_cap else default_cap
     if raw in ("skip", "-1"):
         return 0
     try:
         cap = int(raw)
     except ValueError:
         return 0
-    return cap if cap > 0 else None
+    if cap <= 0:
+        return ctx_cap
+    return min(cap, ctx_cap) if ctx_cap else cap
 
 
 '''
@@ -228,7 +246,7 @@ def main() -> int:
     else:
         print(f"{P.name}: {MARK} present — core seams kept")
     # Upgrade a baked-in older policy helper in place (the image ships v1; "ladder" arrived 2026-09-10).
-    if "def _glm53_mixed_prefill_policy(" in text and '"ladder"' not in text:
+    if "def _glm53_mixed_prefill_policy(" in text and ("\"ladder\"" not in text or "GLM53_PREFILL_CHUNK_CTX_BUDGET" not in text):
         import re as _re
         start = text.index("def _glm53_mixed_prefill_policy(")
         m = _re.compile(r"\n(?=(def |class |from |import |@))").search(text, start + 1)

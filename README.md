@@ -189,6 +189,16 @@ and `GLM53_MM_CAP=0` restores the upstream rejection above it.
   cap (full 2048-token chunks next to decoders): the fastest possible prefill, ~800 tok/s next to one decoder,
   with ~2.5 s gaps in that decoder's output.
 
+### 1.76 Context-aware prefill chunks
+
+The sparse-MLA indexer scores every query of a chunk against the whole context, so its per-step scratch scales
+with chunk x context: about 1 GB at 2048 x 588K, which is the head node's entire memory margin (two watchdog
+trips on 2026-09-10). `GLM53_PREFILL_CHUNK_CTX_BUDGET` (default 3e8 token^2) caps the chunk so that product
+stays bounded: full 2048-token chunks below ~146K tokens of context, 896 at 300K, 384 at 588K. Per-token MoE
+cost is flat above ~256-token chunks, so throughput at deep context barely changes. The mixed-prefill ladder is
+applied on top. `kit-patches/patch_apc_probe.py` adds a per-group prefix-cache hit log for prompts over ~96K
+tokens, to tell a prompt change from an evicted KDA state.
+
 ### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
 
 The engine reports a 2.15M-token KV cache, but on this hybrid model that is one group's view. vLLM sets the

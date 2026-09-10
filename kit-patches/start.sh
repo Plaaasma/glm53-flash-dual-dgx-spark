@@ -190,6 +190,7 @@ EXL3MT_PATCH_HOST="${EXL3MT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_mt.py}"
 EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-/home/liam/glm53/nvfp4-vllm/exl3-mt/glm53_exl3_mt.so}"
 MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 MMCHUNK_PATCH_HOST="${MMCHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_chunk.py}"
+APCPROBE_PATCH_HOST="${APCPROBE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_probe.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
@@ -271,6 +272,7 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 GLM53_MIXED_PREFILL_LADDER="${GLM53_MIXED_PREFILL_LADDER:-1:1024,2:512,4:256,*:128}"
+GLM53_PREFILL_CHUNK_CTX_BUDGET="${GLM53_PREFILL_CHUNK_CTX_BUDGET:-300000000}"
 GLM53_NVFP4_KV="${GLM53_NVFP4_KV:-0}"
 GLM53_NVFP4_SYNCFREE_T="${GLM53_NVFP4_SYNCFREE_T:-192}"
 GLM53_VIZ="${GLM53_VIZ:-0}"
@@ -1033,6 +1035,9 @@ fi
 if [ -f /opt/glm53/patch_mm_chunk.py ]; then
     python3 /opt/glm53/patch_mm_chunk.py
 fi
+if [ -f /opt/glm53/patch_apc_probe.py ]; then
+    python3 /opt/glm53/patch_apc_probe.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1167,6 +1172,9 @@ fi
 if [ -f /opt/glm53/patch_mm_chunk.py ]; then
     python3 /opt/glm53/patch_mm_chunk.py
 fi
+if [ -f /opt/glm53/patch_apc_probe.py ]; then
+    python3 /opt/glm53/patch_apc_probe.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1227,6 +1235,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
     scp -q -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
     scp -q -o BatchMode=yes "$MMCHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_chunk.py"
+    scp -q -o BatchMode=yes "$APCPROBE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_probe.py"
     [ -f "$EXL3MT_SO_HOST" ] && scp -q -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
     scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1255,6 +1264,7 @@ launch_cluster() {
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
         -e "GLM53_MIXED_PREFILL_LADDER=${GLM53_MIXED_PREFILL_LADDER:-1:1024,2:512,4:256,*:128}"
+        -e "GLM53_PREFILL_CHUNK_CTX_BUDGET=$GLM53_PREFILL_CHUNK_CTX_BUDGET"
         -e "GLM53_NVFP4_KV=$GLM53_NVFP4_KV"
         -e "GLM53_NVFP4_SYNCFREE_T=$GLM53_NVFP4_SYNCFREE_T"
         -e "GLM53_VIZ=$GLM53_VIZ"
@@ -1362,6 +1372,7 @@ launch_cluster() {
         -v '/tmp/patch_exl3_mt.py:/opt/glm53/patch_exl3_mt.py:ro' \
         -v '/tmp/patch_mm_cap.py:/opt/glm53/patch_mm_cap.py:ro' \
         -v '/tmp/patch_mm_chunk.py:/opt/glm53/patch_mm_chunk.py:ro' \
+        -v '/tmp/patch_apc_probe.py:/opt/glm53/patch_apc_probe.py:ro' \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_mt.so:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
@@ -1407,6 +1418,7 @@ launch_cluster() {
         -v "$EXL3MT_PATCH_HOST:/opt/glm53/patch_exl3_mt.py:ro" \
         -v "$MMCAP_PATCH_HOST:/opt/glm53/patch_mm_cap.py:ro" \
         -v "$MMCHUNK_PATCH_HOST:/opt/glm53/patch_mm_chunk.py:ro" \
+        -v "$APCPROBE_PATCH_HOST:/opt/glm53/patch_apc_probe.py:ro" \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v $EXL3MT_SO_HOST:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v "$LOADDIAG_PATCH_HOST:/opt/glm53/patch_load_diag.py:ro" \
         -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
