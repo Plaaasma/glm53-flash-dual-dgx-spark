@@ -280,7 +280,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 "use strict";
-const API = new URLSearchParams(location.search).get("api") || `${location.protocol}//${location.hostname}:9102`;
+const API = new URLSearchParams(location.search).get("api") || (location.port === "3000" ? "/api" : `${location.protocol}//${location.hostname}:9102`);   // same port serves the page and the JSON API
 const $ = id => document.getElementById(id);
 const C = {acc:"#c8f542", sky:"#52b7ff", coral:"#ff6e5e", lav:"#b08cff",
            gold:"#ffc24b", teal:"#3edbb6", pink:"#ff8adb", slate:"#5c6b84"};

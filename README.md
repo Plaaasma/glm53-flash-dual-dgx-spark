@@ -205,6 +205,23 @@ page drops to ~1.4 IDs and the cache holds ~1.7M tokens. The only thing that get
 hit (a branch, or a cancelled prefill resuming), which falls back to the last checkpoint, up to 63K tokens
 back. The dashboard's KV panels now show the pool in page IDs: in use, cached, free.
 
+### 1.9 Dashboard data as JSON on the same port
+
+`dashboard/dash_server.py` replaces `python -m http.server` for port 3000: it serves the page and mirrors
+everything on it as JSON, proxied from the collector on :9102 with the page's client-side arithmetic applied
+server-side. `GET /api` lists the endpoints:
+
+| endpoint | contents |
+|---|---|
+| `/api/all` | everything below in one document (`?viz=1` adds the activation frames, `?window=900&points=60` sizes the history) |
+| `/api/derived` | per-stream tok/s over decoding streams, prefilling count, spec-decode stats, KV pool pages (in use / cached / free), est. bandwidth, per-node GPU/memory/engined |
+| `/api/requests` | per-request progress: prompt/computed/total tokens, phase, prefill % |
+| `/api/live`, `/api/nodes`, `/api/viz`, `/api/viz/status`, `/api/totals`, `/api/history?from&to&points` | the collector's own endpoints |
+| `/api/engined` | the engined memory watch: both nodes, caps, alert state |
+
+The page itself uses `/api` when served from :3000 (`?api=` overrides). Unit file: `ExecStart=/usr/bin/python3
+/home/liam/cluster-dashboard/dash_server.py`, `Environment=PORT=3000`.
+
 ## 2. Get the kit and apply the patches
 
 ```bash
