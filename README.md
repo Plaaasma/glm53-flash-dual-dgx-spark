@@ -167,6 +167,14 @@ On this box the head node has 3 to 6 GB of headroom next to the serving processe
 matter. The earlier 400 (`At most N image(s) may be provided in one prompt`) no longer occurs below the limit,
 and `GLM53_MM_CAP=0` restores the upstream rejection above it.
 
+### 1.75 Max prefill speed: the two knobs
+
+- `GLM53_EXL3_MT=1` turns on the M-tiled MoE kernel from 1.6 (1.8 to 2.5x on the MoE share of a prefill step).
+- `GLM53_MIXED_PREFILL_CHUNK=ladder` with `GLM53_MIXED_PREFILL_LADDER="1:1024,2:512,4:256,*:128"` sizes the
+  mixed-prefill chunk by how many other requests are decoding. A mixed step reads the whole expert set once
+  whatever the chunk, so a 1024-token chunk next to one decoding stream prefills ~8x faster than the old fixed
+  128 at the cost of longer gaps in that stream's output; with five or more decoders it falls back to 128.
+
 ### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
 
 The engine reports a 2.15M-token KV cache, but on this hybrid model that is one group's view. vLLM sets the
