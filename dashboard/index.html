@@ -257,7 +257,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
     <div id="ambient">
       <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
       <div id="agrid3d">
-        <div class="apanel cortex"><div class="ph"><h4>cortex — glm-5.3-flash: tokenizer → 45 layers (34 kda · 11 dsa · 42 moe × 288) → sampler</h4><span class="sub" id="cx_sub">drag to orbit · wheel to zoom</span></div><canvas id="cv3_cortex"></canvas></div>
+        <div class="apanel cortex"><div class="ph"><h4>cortex — glm-5.3-flash: tokenizer → 45 layers (34 kda · 11 dsa · 42 moe × 288) → sampler</h4><span class="sub" id="cx_sub">drag to orbit · right-drag to pan · wheel to zoom · double-click to reset</span></div><canvas id="cv3_cortex"></canvas></div>
         <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
         <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
@@ -795,15 +795,23 @@ function mk3(id){
   r.setPixelRatio(Math.min(devicePixelRatio||1, 2)); r.setClearColor(0x0b0d10, 1);
   const s = new THREE.Scene(); const c = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
   const o = {r, s, c, el, dirty:true, theta:0.6, phi:1.15, rad:60, target:new THREE.Vector3(), auto:true, lastDrag:0};
-  el.addEventListener("pointerdown", e=>{ o.drag={x:e.clientX,y:e.clientY,th:o.theta,ph:o.phi}; el.setPointerCapture(e.pointerId); el.style.cursor="grabbing"; });
-  el.addEventListener("pointermove", e=>{ if(!o.drag) return; o.theta = o.drag.th - (e.clientX-o.drag.x)*0.008; o.phi = Math.max(0.15, Math.min(2.9, o.drag.ph - (e.clientY-o.drag.y)*0.008)); o.lastDrag = Date.now(); });
-  el.addEventListener("pointerup", ()=>{ o.drag=null; el.style.cursor="grab"; }); el.addEventListener("pointercancel", ()=>{ o.drag=null; });
+  // left-drag orbits, right-drag (or middle-drag) pans the orbit target in the camera plane, wheel zooms, double-click resets
+  el.addEventListener("pointerdown", e=>{ if (e.button === 2 || e.button === 1) o.pan={x:e.clientX,y:e.clientY,t:o.target.clone()}; else o.drag={x:e.clientX,y:e.clientY,th:o.theta,ph:o.phi};
+    el.setPointerCapture(e.pointerId); el.style.cursor = o.pan ? "move" : "grabbing"; });
+  el.addEventListener("pointermove", e=>{
+    if (o.pan){ const k = o.rad*0.0016, dir = new THREE.Vector3(); o.c.getWorldDirection(dir);
+      const right = new THREE.Vector3().crossVectors(dir, o.c.up).normalize(), up = new THREE.Vector3().crossVectors(right, dir).normalize();
+      o.target.copy(o.pan.t).addScaledVector(right, -(e.clientX-o.pan.x)*k).addScaledVector(up, (e.clientY-o.pan.y)*k); o.lastDrag = Date.now(); return; }
+    if(!o.drag) return; o.theta = o.drag.th - (e.clientX-o.drag.x)*0.008; o.phi = Math.max(0.15, Math.min(2.9, o.drag.ph - (e.clientY-o.drag.y)*0.008)); o.lastDrag = Date.now(); });
+  el.addEventListener("pointerup", ()=>{ o.drag=null; o.pan=null; el.style.cursor="grab"; }); el.addEventListener("pointercancel", ()=>{ o.drag=null; o.pan=null; });
+  el.addEventListener("contextmenu", e=>e.preventDefault());
   el.addEventListener("wheel", e=>{ e.preventDefault(); o.rad = Math.max(8, Math.min(200, o.rad*Math.exp(e.deltaY*0.0012))); o.lastDrag = Date.now(); }, {passive:false});
-  el.addEventListener("dblclick", ()=>{ o.theta=0.6; o.phi=1.15; o.rad=o.rad0||60; });
+  el.addEventListener("dblclick", ()=>{ o.theta=o.theta0 ?? 0.6; o.phi=o.phi0 ?? 1.15; o.rad=o.rad0||60; if (o.target0) o.target.copy(o.target0); });
   return o;
 }
 function place(o){
   const W = o.el.clientWidth, H = o.el.clientHeight; if (!W||!H) return false;
+  if (!o.target0){ o.target0 = o.target.clone(); o.theta0 = o.theta; o.phi0 = o.phi; }   // home view = what init left, for double-click reset
   const need = o.el.width !== Math.round(W*(Math.min(devicePixelRatio||1,2))) ;
   if (need){ o.r.setSize(W, H, false); o.c.aspect = W/H; o.c.updateProjectionMatrix(); }
   if (o.auto && !o.drag && Date.now()-o.lastDrag > 4000) o.theta += 0.0025;
@@ -937,7 +945,7 @@ function drawCortex(){
     poolText3(o, o.tin, Math.min(tin.length, 8), MD.yEmb, -1, 0, 4.0); tin.slice(0,8).forEach(([id,txt],i) => setText(o.tin[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
     poolText3(o, o.tout, Math.min(tout.length, 8), MD.yHead, 1, 0, 4.0); tout.slice(0,8).forEach(([id,txt],i) => setText(o.tout[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
     const reqs = (a.reqs||[]); $("cx_sub").innerHTML = (reqs.length ? reqs.map(([id,s,n]) => `<span style="color:hsl(${reqHue(id)*360},85%,60%)">■</span> ${id} · ${n} tok`).join(" &nbsp; ") : "no tokens this step")
-      + ` &nbsp;·&nbsp; 45 layers (34 kda + 11 dsa) · 42 moe × 288 + shared · ${a.tok ? "" : "token text + kda heads after next restart · "}drag to orbit`;
+      + ` &nbsp;·&nbsp; 45 layers (34 kda + 11 dsa) · 42 moe × 288 + shared · ${a.tok ? "" : "token text + kda heads after next restart · "}drag to orbit · right-drag to pan`;
     o.dirty = false;
   }
   o.r.render(o.s, o.c);
