@@ -113,6 +113,12 @@ The in-engine allocator maintenance now runs every 30 s (`GLM53_MEM_MAINT_S=30`)
 allocation peak since the previous tick (`peak=... (+N transient)`), the multimodal processor cache is 1 GiB
 and the cold-image budget 16, all to keep the head's structural headroom (~3.5 GiB) usable.
 
+**Orphaned shared memory.** vLLM's processes create `/dev/shm/psm_*` segments and an object-storage buffer;
+a watchdog kill never unlinks them and with `--ipc=host` they outlive the container. After a week of trips the
+head carried 133 leftovers holding 690 MiB (mostly pushed into swap by the reclaims). `start.sh` now runs
+`kit-patches/shm_cleanup.py` on both nodes after tearing the old containers down: a throwaway container of the
+kit image (`--pid=host --ipc=host`, root) unlinks only the segments no process maps or holds open.
+
 **Long-running headroom.** The post-boot headroom is not permanent: over ~14 h
 of deep-context serving both nodes crept up ~0.17 GiB/h (reclaimed cold pages
 fault back in, allocator slack accumulates, other host processes grow) until
@@ -207,10 +213,12 @@ K gather uses a persistent workspace. So the torch-side transient is bounded at 
 exactly what every maintenance tick released at 700K. The rest of the swing the head showed before the trip
 (MemAvailable 1.4-5.7 GiB between ticks) was host-side: the worker process's ~1 GiB anonymous working set being
 pushed to zram by the one-minute reclaim and faulted straight back. Two settings follow from that:
-`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` (both TP ranks; smaller sub-chunks, same total work) and, as a stopgap
-until the peak log confirms the per-step maximum at deep context, `GLM53_PREFILL_CHUNK_CTX_BUDGET=80000000`
-with a 128-token floor: chunks 1024 at 80K, 512 at 150K, 256 at 300K, 128 from 500K. Prefill at 500K+ costs
-about 250 tok/s under that floor; restore 3e8 once the peak line shows headroom.
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` (both TP ranks; smaller sub-chunks, same total work), and the chunk
+budget stays at 3e8 (2048 below 146K, 896 at 300K, 512 at 588K, 384 at 700K, 256 at 800K). An 8e7 stopgap
+with a 128-token floor was tried for one boot: at 691K context it held every step to 128 tokens and prefill
+fell to ~230 tok/s, because the fixed per-step cost (one full expert-set read plus the indexer pass) dominates
+below ~384-token chunks. Do not go below 3e8; raise it once the maintenance log's `peak` line shows the real
+per-step maximum at deep context.
 
 ### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
 

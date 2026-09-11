@@ -1202,10 +1202,31 @@ EOF
     chmod +x "$HEAD_SCRIPT" "$WORKER_SCRIPT"
 }
 
+# Orphaned POSIX shared memory (2026-09-10): vLLM's processes create /dev/shm/psm_* segments and an object-storage
+# buffer; a watchdog kill never unlinks them, and with --ipc=host they outlive the container (133 leftovers held
+# 690 MiB of the head's RAM). overlay/shm_cleanup.py removes only segments no process references; it runs in a
+# throwaway container of the kit image (root, host pid namespace) because the nodes have no passwordless sudo.
+SHM_CLEANUP_HOST="${SHM_CLEANUP_HOST:-$SCRIPT_DIR/overlay/shm_cleanup.py}"
+cleanup_orphan_shm() {
+    local where="$1" out   # head | worker
+    [ -f "$SHM_CLEANUP_HOST" ] || return 0
+    local run="docker run --rm --pid=host --ipc=host --cap-add SYS_PTRACE -v /dev/shm:/dev/shm"
+    if [ "$where" = worker ]; then
+        scp -q -o BatchMode=yes "$SHM_CLEANUP_HOST" "${WORKER_SSH}:/tmp/glm53_shm_cleanup.py" 2>/dev/null || return 0
+        out=$(worker_ssh "$run -v /tmp/glm53_shm_cleanup.py:/opt/shm_cleanup.py:ro --entrypoint python3 '$IMAGE' /opt/shm_cleanup.py" 2>/dev/null | grep '^removed' || true)
+    else
+        out=$($run -v "$SHM_CLEANUP_HOST:/opt/shm_cleanup.py:ro" --entrypoint python3 "$IMAGE" /opt/shm_cleanup.py 2>/dev/null | grep '^removed' || true)
+    fi
+    [ -n "$out" ] && log "shm cleanup ($where): $out"
+    return 0
+}
+
 # ------------------------------- launch ------------------------------------
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+    cleanup_orphan_shm head
+    cleanup_orphan_shm worker
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
     worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
