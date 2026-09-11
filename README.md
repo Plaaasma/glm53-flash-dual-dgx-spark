@@ -351,8 +351,9 @@ shared expert), the residual-stream spine on the left, the LM head/sampler on to
 draft layer beside it. Strands are the step's tokens through the experts they were routed to,
 coloured by request. The runtime (`nvfp4-kv/glm53_viz_runtime.py`, hooks in
 `kit-patches/patch_viz_hooks.py`) additionally sends per-head KDA output norms (`kda`) and the
-token pieces entering and leaving the model (`tok`, decoded with the `tokenizers` library from
-the model's `tokenizer.json`); the page degrades to ids/counts when a frame lacks them. It understands vLLM's metric quirks on this
+number of tokens each request had accepted by the sampler (`acc`). No token ids or text ever
+leave the engine: the tokenizer/sampler stages show per-request counts only, so nothing a user
+sends or receives can be read off the dashboard. It understands vLLM's metric quirks on this
 stack — e.g. deriving *live* prefill throughput from the per-step iteration
 histogram, because `prompt_tokens_total` only updates at request completion.
 

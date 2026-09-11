@@ -826,7 +826,8 @@ const addMat = (extra={}) => Object.assign({color:0xffffff, transparent:true, bl
    attention block (34 KDA linear-attention layers as head plates, 11 DSA sparse-attention layers as context bars) and the MLP
    (3 dense plates, then 42 MoE plates of 24x12 = 288 experts + 1 shared), the LM head/sampler on top and the MTP draft layer
    beside it. Strands are this step's tokens (colour = request) through the experts they were routed to; rays are where the DSA
-   layers read in the context; the spine is the residual-stream magnitude per layer. */
+   layers read in the context; the spine is the residual-stream magnitude per layer. No token ids or text are shown or received:
+   the runtime only sends per-request counts. */
 const MD = (() => {
   const dsa = [3,7,11,15,19,23,27,31,35,39,43];
   const kda = []; for (let l=0;l<45;l++) if (!dsa.includes(l)) kda.push(l);
@@ -938,14 +939,13 @@ function drawCortex(){
         seg(px,py,pz, xt*0.5, MD.yHead, 0, hc, 0.9);
         if (nMoe > 42){ const e = a.r3[(42*T+t)*K+k]; if (e >= 0 && e < MD.E){ const [x,z] = cellXZ(e); seg(xt*0.5, MD.yHead, 0, MD.xMtp+x, MD.yHead, z, hc, 0.5); } } } }
     o.strands.geometry.setDrawRange(0, ns*2); o.strands.geometry.attributes.position.needsUpdate = true; o.strands.geometry.attributes.color.needsUpdate = true;
-    // --- token text: what entered the tokenizer/embedding this step and what the sampler emitted (ids only until the runtime sends pieces)
-    const tin = (a.tok && a.tok.in && a.tok.in.length) ? a.tok.in.map(([id,n,f,l]) => [id, `${id} · ${n} tok  ${f.join("")}${l.length ? " … " + l.join("") : ""}`])
-                                                       : (a.reqs||[]).map(([id,s,n]) => [id, `${id} · ${n} tok`]);
-    const tout = (a.tok && a.tok.out) ? a.tok.out.map(([id,p]) => [id, `${id} → ${p.join("")}`]) : [];
+    // --- per-request counts only (no token ids or text ever reach the page): tokens entering this step, tokens accepted by the sampler
+    const tin = (a.reqs||[]).map(([id,s,n]) => [id, `${id} · ${n} tok in`]);
+    const tout = (a.acc||[]).map(([id,n]) => [id, `${id} · ${n} accepted`]);
     poolText3(o, o.tin, Math.min(tin.length, 8), MD.yEmb, -1, 0, 4.0); tin.slice(0,8).forEach(([id,txt],i) => setText(o.tin[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
     poolText3(o, o.tout, Math.min(tout.length, 8), MD.yHead, 1, 0, 4.0); tout.slice(0,8).forEach(([id,txt],i) => setText(o.tout[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
     const reqs = (a.reqs||[]); $("cx_sub").innerHTML = (reqs.length ? reqs.map(([id,s,n]) => `<span style="color:hsl(${reqHue(id)*360},85%,60%)">■</span> ${id} · ${n} tok`).join(" &nbsp; ") : "no tokens this step")
-      + ` &nbsp;·&nbsp; 45 layers (34 kda + 11 dsa) · 42 moe × 288 + shared · ${a.tok ? "" : "token text + kda heads after next restart · "}drag to orbit · right-drag to pan`;
+      + ` &nbsp;·&nbsp; 45 layers (34 kda + 11 dsa) · 42 moe × 288 + shared · ${a.kd ? "" : "kda heads after next restart · "}drag to orbit · right-drag to pan`;
     o.dirty = false;
   }
   o.r.render(o.s, o.c);
