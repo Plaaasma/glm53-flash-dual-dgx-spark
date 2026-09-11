@@ -1,24 +1,50 @@
-# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 2.6M-token KV pool, NVFP4 KV cache, 16-way serving
+# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 2.05M-token KV pool, NVFP4 KV cache, 16-way serving
 
 A complete, battle-tested recipe for serving **GLM-5.3-Flash** (320B/18B MoE,
 vision included) across **two DGX Sparks (GB10, sm_121)** with:
 
-- **2,600,787-token KV pool** (≈ 9.9 concurrent full 262K-context sessions)
+- **2,049,230-token KV pool** at a 9.06 GB per-node pin (2.28× the 900K max
+  context; two ~460K-token agent sessions stay prefix-cached side by side)
 - **NVFP4 KV cache** — 288 B/token vs the stock 656 B `fp8_ds_mla` (2.28×
   denser), via a gather-dequant Triton path feeding the stock prebuilt kernel
-- **16 concurrency slots**, 900K max context per request
-- **67.6 tok/s aggregate** at 12-way concurrency, ~22 tok/s single-stream code
+- **16 concurrency slots**, 900K max context per request, MTP speculative
+  decode (2.7 accepted tokens per step at 1-2 streams)
+- **22.6 tok/s single-stream** averaged over 48 h of production (17 tok/s at
+  460K context), 32 tok/s aggregate at 5 streams, 67.6 tok/s at 12-way GSM8K
+- **Prefill ~830 tok/s** at short context with the M-tiled EXL3 MoE kernel
+  (2× per MoE layer over the stock kernel), 600-760 tok/s out to 450K tokens,
+  ~330 tok/s at 700K
 - GSM8K **59/60** under 12-way load, **zero** request errors, greedy outputs
   byte-identical to the fp8-KV baseline
 - Host-side guard rails that turn this platform's infamous memory livelocks
-  into ordinary process restarts
+  into ordinary process restarts, and a live dashboard that draws the model
+  itself (tokenizer → 45 layers → sampler) with a JSON API
 
 Builds on [MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks)
-(their vLLM-fork image + EXL3 kernels). This repo adds the NVFP4 KV pool, an
-interleave scheduler policy, the memory guard rails, a monitoring dashboard,
-and the exact configuration that survives on real hardware.
+(their vLLM-fork image + EXL3 kernels). This repo adds the NVFP4 KV pool, the
+M-tiled prefill kernel, the mixed-prefill ladder and context-aware chunking,
+the multimodal caps, the memory guard rails, a monitoring dashboard, and the
+exact configuration that survives on real hardware.
 
-Measured speeds: [`bench/llama-benchy.md`](bench/llama-benchy.md).
+Measured speeds: section 8 (production logs, 2026-09-10/11) and
+[`bench/benchy-c1.md`](bench/benchy-c1.md) (llama-benchy, 2026-09-02).
+
+### Configuration at a glance (live on 2026-09-11)
+
+| item | value |
+|---|---|
+| Image / engine | `glm53-flash-sm121:local-0904-it` (21.8 GB, built 2026-09-04), vLLM fork `v0.1.dev20051+g487ecf187` |
+| Host | DGX OS kernel 6.17.0-1026-nvidia, driver 580.159.03, GB10 121.63 GiB unified per node |
+| Weights | `neko-legends/GLM-5.3-Flash-Uncensored-EXL3` rev `1fac3dbe`, 92 shards, 163.65 GiB, on both nodes |
+| KV pool | `--kv-cache-memory 9060000000` per node → 2,049,230 tokens, 296 page IDs of 7936 tokens shared by 5 cache groups |
+| Limits | `MAX_MODEL_LEN=900000`, `MAX_NUM_SEQS=16`, `MAX_NUM_BATCHED_TOKENS=2048`, `--prefix-match-unit 64` |
+| Speculative decode | `SPEC_METHOD=mtp`, `MTP_TOKENS=3`, dynamic `[[1,2,3],[3,16,2]]` (3 drafts at 1-2 streams, 2 at 3-16) |
+| Prefill | `GLM53_EXL3_MT=1` variant 8 (auto), ladder `1:1024,2:512,4:256,*:128`, `GLM53_PREFILL_CHUNK_CTX_BUDGET=3e8`, `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` |
+| Prefix cache | `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=63488` (KDA checkpoint every 8 pages) |
+| Multimodal | 128 images per prompt, `max_image_tokens=1024` (1008 per 1080p), lru processor cache 1 GiB, chunks of 4, 16 cold images per request |
+| Memory guard | watchdog at 0.75 GiB, boot guard at 2.5 GiB, post-load/ready reclaim 4/3 GiB, cron reclaim 2 GiB every 20 min + every minute under 2.5 GiB, in-engine maintenance every 30 s |
+| Boot | launch → healthy 249-346 s over the last 17 boots (typical ~290 s) |
+| Ports | API 8888, dashboard + JSON 3000, collector 9102, node agents 9101, viz UDP 9103 |
 
 ---
 
@@ -28,9 +54,9 @@ Measured speeds: [`bench/llama-benchy.md`](bench/llama-benchy.md).
 |---|---|
 | Hardware | 2× DGX Spark (GB10, 121.63 GiB unified each), joined by the CX7 200GbE QSFP cable |
 | Disk | ≥ 200 GB free per node (weights are ~164 GiB, on BOTH nodes) |
-| Software | stock DGX OS, Docker with NVIDIA runtime, ssh between nodes as the same user |
+| Software | stock DGX OS (kernel 6.17.0-1026-nvidia, driver 580.159.03 as tested), Docker with NVIDIA runtime, ssh between nodes as the same user |
 | Accounts | a HuggingFace token (weights are public but rate-limits bite) |
-| Time | ~2 h: ~1 h weight download, ~20 min image, ~10 min per server boot |
+| Time | ~2 h: ~1 h weight download, ~20 min image, ~5 min per server boot (InstantTensor) |
 
 Terminology: the node you run commands on is the **head**; the other is the
 **worker**. All commands run on the head unless said otherwise.
@@ -65,7 +91,7 @@ What it does and why (each of these was learned from a real failure):
 The stock loader mmaps the safetensors and reads them at ~150–300 MB/s: 259 s
 for 164 GB. [InstantTensor](https://pypi.org/project/instanttensor/) streams
 them with Direct I/O at 4.7–5.6 GB/s: 35 s. Launch-to-API drops from ~9 min
-to ~4.5 min. Two pieces, both nodes:
+to ~5 min (249-346 s over the last 17 boots, both reclaims included). Two pieces, both nodes:
 
 1. Build the image (source build, no aarch64 wheel; ~2 min) and copy it to
    the worker:
@@ -134,7 +160,7 @@ optional:
    (sudo crontab -l 2>/dev/null; echo "*/20 * * * * /usr/local/sbin/glm53-reclaim glm53-exl3-head 2 >> /var/tmp/glm53-reclaim.log 2>&1") | sudo crontab -   # worker: glm53-exl3-worker
    ```
 2. In-engine maintenance (`nvfp4-kv/glm53_viz_runtime.py`, `set_batch` seam,
-   on every rank): every `GLM53_MEM_MAINT_S` seconds (default 600; the live kit runs 300) it logs
+   on every rank): every `GLM53_MEM_MAINT_S` seconds (default 600; the live kit runs 30) it logs
    `[glm53-mem]` (MemAvailable, process RSS/swap, torch allocated/reserved) and
    returns caching-allocator slack with `torch.cuda.empty_cache()` outside
    graph capture (`GLM53_MEM_MAINT_EMPTY_CACHE=0` to log only). Grep the head
@@ -173,7 +199,7 @@ token back to that point and forces a re-prefill of everything after it; in a 33
 4. **Cold guard.** Chunking bounds preprocessing, but every never-seen image still costs ~60 to 100 MB across
    the rest of the pipeline (decoded PIL image, processed tensors in the API server, the IPC copy, the engine
    core's cache, the encoder input on the GPU): a cold 32-screenshot request dipped the head by 2.8 GB. So
-   the cap pass admits at most `GLM53_MM_COLD_MAX` (24) never-seen images per request, newest first, and keeps
+   the cap pass admits at most `GLM53_MM_COLD_MAX` (16 today; 24 when measured below) never-seen images per request, newest first, and keeps
    every image it accepted before (a bounded LRU of content hashes; rejected ones stay rejected). A session's
    first turn after a restart is capped, then it grows append-only to the limit with the prefix cache hitting
    (`kit-patches/tests/test_mm_cap3.py`). Measured live: a cold 40-screenshot turn admitted 24 (57 s, head
@@ -220,11 +246,11 @@ fell to ~230 tok/s, because the fixed per-step cost (one full expert-set read pl
 below ~384-token chunks. Do not go below 3e8; raise it once the maintenance log's `peak` line shows the real
 per-step maximum at deep context.
 
-### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
+### 1.8 Why idle sessions went cold: the KV pool is ~300 page IDs shared by four cache groups
 
-The engine reports a 2.15M-token KV cache, but on this hybrid model that is one group's view. vLLM sets the
-attention block to 7936 tokens so its page equals the KDA state page, and the block pool is a single set of
-~310 page IDs shared by the MLA group and the three KDA groups. With prefix caching in `align` mode and no
+The engine reports a 2.05M-token KV cache (2.15M at the earlier 9.5 GB pin), but on this hybrid model that is
+one group's view. vLLM sets the attention block to 7936 tokens so its page equals the KDA state page, and the
+block pool is a single set of 296 page IDs (310 at 9.5 GB) shared by the MLA group and the three KDA groups. With prefix caching in `align` mode and no
 retention interval, every 7936-token page of a conversation leaves one cached MLA page plus one cached KDA
 state page per KDA group in the LRU queue: four IDs per page, so the cache holds only ~600K conversation
 tokens before the least recently used session is evicted. Observed: a 417K-token session plus a 216K-token
@@ -235,6 +261,16 @@ session, and the second went cold after 38 idle minutes although "kv usage" show
 page drops to ~1.4 IDs and the cache holds ~1.7M tokens. The only thing that gets slower is a partial-prefix
 hit (a branch, or a cancelled prefill resuming), which falls back to the last checkpoint, up to 63K tokens
 back. The dashboard's KV panels now show the pool in page IDs: in use, cached, free.
+
+**Capacity and eviction order (2026-09-11).** A ~460K-token session costs 59 attention pages plus its KDA
+snapshots and per-turn leftovers; two of them fill the pool (observed 271 of 296 IDs cached, 0 free). Eviction
+is plain LRU by free time, and a hit refreshes every attention page but only the one KDA boundary state, so a
+session's KDA checkpoints keep the age of its original prefill. Under a sub-agent fan-out they are the oldest
+blocks in the pool and go first, and losing them zeroes the hybrid hit: the scheduler's probe logged
+`final=0 longest=461312` (461K of attention cache present, no KDA state) 19 minutes after the session's last
+turn, followed by a full re-prefill. The fix in progress refreshes a session's KDA snapshots on every hit and
+logs evictions by group; until then, expect a main-agent context to go cold when a fan-out of ~8 sub-agents
+runs next to a second large session.
 
 ### 1.9 Dashboard data as JSON on the same port
 
@@ -266,14 +302,15 @@ This clones the MiaAI-Lab kit at the tested commit and applies
 - **NVFP4 KV wiring** — ships `nvfp4-kv/patch_nvfp4_kv.py` +
   `glm53_nvfp4_runtime.py` into both containers at boot (same mount-and-patch
   mechanism the kit itself uses).
-- **Mixed-prefill policy `GLM53_MIXED_PREFILL_CHUNK=128`** — the kit's
+- **Mixed-prefill policy `GLM53_MIXED_PREFILL_CHUNK=ladder`** — the kit's
   default (`skip`) starves every new prompt's prefill while any decode runs
   (minutes of dead TTFT, client retry storms). Our first fix (`interleave`)
-  ended starvation but delivered decode in waves. The shipped setting caps
-  mixed prefill at 128 tokens/step, which on this stack (flat ~700 tok/s
-  prefill at any depth — the kit's old per-step-cost measurement no longer
-  applies) bounds every engine step, measured with a streaming client while
-  a 35K prefill lands concurrently:
+  ended starvation but delivered decode in waves; a fixed 128-token cap then
+  bounded every engine step (table below, measured 2026-09-02 with a
+  streaming client while a 35K prefill landed concurrently). The shipped
+  setting today is the ladder from section 1.75 (1024/512/256/128 by the
+  number of decoding peers) under the context-aware cap of 1.76: same
+  bounded gaps with one or two decoders, 3-8× faster mixed prefill.
 
   | policy | median gap | p95 | p99 | max |
   |---|---|---|---|---|
@@ -281,8 +318,9 @@ This clones the MiaAI-Lab kit at the tested commit and applies
   | cap 256 | 550 ms | 721 ms | 1294 ms | 1345 ms |
   | **cap 128 (shipped)** | **426 ms** | **502 ms** | **936 ms** | **1245 ms** |
 
-  A continuous stream at any concurrency, at the cost of prefill running
-  ~350 tok/s during overlap (solo prefill unaffected).
+  A continuous stream at any concurrency; with the fixed 128 cap prefill ran
+  ~350 tok/s during overlap, with the ladder it runs at the numbers in
+  section 8 (solo prefill unaffected either way).
 - **Extended CUDA-graph capture sizes** so full-batch decode steps at 16
   concurrency stay inside graphs.
 
@@ -298,12 +336,17 @@ Then edit `exl3-kit/.env` (copied from `kit-patches/env.example`):
 Everything else in `env.example` is the tested configuration. The
 load-bearing values, so you don't "clean them up":
 
-- `SPEC_METHOD=mtp` — DFlash2 speculative decode is ~5 tok/s faster on code
-  but its ~10 GiB footprint makes the 2.6M pool impossible. Flip to `dflash`
-  + restart if you want speed over pool (pool must then shrink: lower
-  `EXTRA_ARGS` pin to ≤ `--kv-cache-memory 8000000000`).
-- `EXTRA_ARGS="--kv-cache-memory 11239802020"` — pins the pool. Without it
-  the auto-sizer eats every byte to the watchdog line and boots die.
+- `SPEC_METHOD=mtp` with `MTP_TOKENS=3` and `MTP_DYNAMIC='[[1,2,3],[3,16,2]]'`
+  — 2.7 accepted tokens per step at 1-2 streams (58% acceptance), 2.4 at 3-5.
+  DFlash2 speculative decode is ~5 tok/s faster on code but its ~10 GiB
+  footprint does not fit next to the 2.05M pool. Flip to `dflash` + restart
+  if you want speed over pool (pool must then shrink: lower the `EXTRA_ARGS`
+  pin to ≤ `--kv-cache-memory 8000000000`).
+- `EXTRA_ARGS="--kv-cache-memory 9060000000 ..."` — pins the pool. Without it
+  the auto-sizer eats every byte to the watchdog line and boots die. The pin
+  came down from 11.24 GB (2.6M tokens) to 9.5 GB and then 9.06 GB (2.05M)
+  during 2026-09-10 to buy the head node headroom at 600-700K-token contexts;
+  each 0.45 GB is ~100K tokens of pool.
 - `MAX_MODEL_LEN=900000` — do NOT lower it "to save memory": hybrid block-id
   overhead then *doubles* the per-token pool cost (measured 8.1 → 18.5 KB).
 - `GPU_MEM_UTIL=0.875`, `CG_ESTIMATE=1`, `GLM53_BOOT_SHAPE_WARMUP=0`,
@@ -322,18 +365,19 @@ slow, run `./download.sh` first and go do something else.
 cd exl3-kit && ./start.sh
 ```
 
-First boot: image pull (20.9 GB) + ship to worker + ~10 min load. Success
+First boot: image pull (21.8 GB) + ship to worker + ~5 min load. Success
 looks like:
 
 ```
-GPU KV cache size: 2,600,787 tokens
+GPU KV cache size: 2,049,230 tokens, Maximum concurrency for 900,000 tokens per request: 2.28x
 ```
 
 and `curl localhost:8888/v1/models` answering with `glm-5.3-flash`
 (OpenAI-compatible API, port 8888, vision + tool calling enabled).
 
-Verify the guard rails: `MemAvailable` ≥ 3 GiB on both nodes
-(`awk '/MemAvailable/{print $2/1048576}' /proc/meminfo`) and
+Verify the guard rails: `MemAvailable` ≥ 3 GiB on both nodes after the
+post-ready reclaim (head settles at 3.6-4.1 GiB, worker at ~5.5 GiB;
+`awk '/MemAvailable/{print $2/1048576}' /proc/meminfo`) and
 `/var/tmp/vllm-watchdog.log` shows `armed`.
 
 ## 5. Monitoring dashboard (optional, recommended)
@@ -394,8 +438,44 @@ Rollback: `GLM53_NVFP4_KV=0` in `.env` + restart.
 | engine wedges minutes at 100 % with big prompts | fat-expert Python fallback (per-expert host syncs) | `EXL3_MOE_ROW_TILE=1` **and** the kit image rebuilt so Python + `exllamav3_ext` match (`BUILD=1 ./start.sh`) — mounting new Python onto an older compiled ext hangs |
 | `SM120 sparse MLA ... expects [num_pages,1,page_size,656]` | NVFP4 scratch shape | already fixed in `glm53_nvfp4_runtime.py` (page-shaped scratch) |
 | `Decode (num_tokens <= 64) must go through ...decode_dsv3_2` | scratch page geometry routed decode to the paged kernel | same fix as above |
+| head watchdog trips during prefill at 600-700K context | indexer logits scratch (≤512 MiB/step by default) + host swap churn on a node with 1-2 GiB headroom | `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128`, chunk budget 3e8 (section 1.76), pin lowered to 9.06 GB |
+| prefill ~230 tok/s at deep context | chunk budget too low (128-token chunks; the fixed per-step cost dominates) | never set `GLM53_PREFILL_CHUNK_CTX_BUDGET` below 3e8 |
+| a 460K session re-prefills from zero minutes after its last turn | its KDA checkpoints were the oldest blocks and got evicted during a fan-out (section 1.8) | fix in progress; keep concurrent large sessions to two |
+| server dies the moment you run a diagnostic inside the container | a `docker exec python3` that imports vLLM/torch costs ~1 GB and the watchdog counts it | read the image from a throwaway `docker run --rm` container with shell tools; never exec Python in the serving container |
+| 133 orphaned `/dev/shm/psm_*` segments, 690 MiB | watchdog kills never unlink vLLM's shared memory (`--ipc=host`) | `start.sh` runs `kit-patches/shm_cleanup.py` on both nodes at launch |
 
-## 8. Benchmarks (llama-benchy, this exact configuration)
+## 8. Benchmarks
+
+### Production numbers (scheduler and dashboard logs, 2026-09-10/11)
+
+Prefill of one cold 475K-token prompt on an otherwise idle server (boot 27, M-tiled kernel, chunk budget 3e8;
+the chunk cap is what the context-aware policy allowed at that depth):
+
+| context | chunk cap | prefill tok/s |
+|---|---|---|
+| < 146K | 2048 | ~830 (pure prefill benchmark) |
+| 150-250K | 1536-1408 | 725-760 |
+| 250-300K | 1152 | 717 |
+| 300-350K | 896 | 675 |
+| 350-450K | 768-640 | 600-640 |
+| 446-573K (boot 26) | 640-512 | 407 |
+| 573-695K (boot 26) | 512-384 | 331 |
+
+Decode over 48 h of real agent traffic (dashboard history, 69K samples):
+
+| decoding streams | aggregate tok/s (avg) | per stream | acceptance | accepted tokens/step |
+|---|---|---|---|---|
+| 1 | 22.6 (17.4 at 460K context) | 22.6 | 58% | 2.7 |
+| 2 | 24.3 | 12.1 | 58% | 2.7 |
+| 3 | 20.0 | 6.7 | 66% | 2.4 |
+| 5 | 32.0 | 6.4 | 69% | 2.4 |
+
+Median inter-token latency while decoding is ~220 ms at the p50 the collector reports; time-to-first-token is
+dominated by whether the prefix cache hits (tens of milliseconds) or a cold prefill runs (minutes at 400K+).
+MoE prefill kernel: 75.1 → 38.0 ms per MoE layer on the real 288-expert routing (2.0×), 33-39 TFLOPS on the
+shared-memory-B variants at ≥128 rows per expert (`nvfp4-kv/exl3-mt/README.md`).
+
+### llama-benchy (2026-09-02, before the M-tiled kernel and the ladder)
 
 Single stream ([`bench/benchy-c1.md`](bench/benchy-c1.md)): prefill is a flat
 **~680-705 tok/s** from 2K to 32K prompts at any depth up to 32K; decode is
