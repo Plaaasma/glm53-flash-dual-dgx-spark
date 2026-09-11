@@ -257,7 +257,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
     <div id="ambient">
       <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
       <div id="agrid3d">
-        <div class="apanel cortex"><div class="ph"><h4>cortex — token paths through 42 moe layers × 288 experts</h4><span class="sub" id="cx_sub">drag to orbit · wheel to zoom</span></div><canvas id="cv3_cortex"></canvas></div>
+        <div class="apanel cortex"><div class="ph"><h4>cortex — glm-5.3-flash: tokenizer → 45 layers (34 kda · 11 dsa · 42 moe × 288) → sampler</h4><span class="sub" id="cx_sub">drag to orbit · wheel to zoom</span></div><canvas id="cv3_cortex"></canvas></div>
         <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
         <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
@@ -777,6 +777,7 @@ const f16 = u => { const s=(u>>15)&1, e=(u>>10)&31, m=u&1023; let v = e===0 ? m*
 function ingestAct3d(a){
   const rb = Uint8Array.from(atob(a.routing3d), c=>c.charCodeAt(0)); a.r3 = new Int16Array(rb.buffer, 0, rb.byteLength>>1);
   a.at = b64u8(a.attn3d);
+  a.kd = a.kda ? b64u8(a.kda) : null;          // per-KDA-layer head norms [46][64] (runtime >= 2026-09-11)
   const hb = Uint8Array.from(atob(a.h3), c=>c.charCodeAt(0)); const hu = new Uint16Array(hb.buffer, 0, hb.byteLength>>1);
   a.pts = new Float32Array(hu.length); for (let i=0;i<hu.length;i++) a.pts[i] = f16(hu[i]);
   VIZ.a3 = a;
@@ -813,59 +814,132 @@ const heat3 = (v, out) => { const t=Math.min(1,Math.max(0,v)); out[0]=(t<0.5?20+
 const tokenHue = (i, n, out) => { const h=(i/Math.max(n,1))*0.85, c=new THREE.Color().setHSL(h, 0.9, 0.6); out[0]=c.r; out[1]=c.g; out[2]=c.b; return out; };
 const addMat = (extra={}) => Object.assign({color:0xffffff, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false}, extra);
 
-/* cortex: one brain per request. Each brain = 42 layers deep x 24x12 expert grid; strands = that request's tokens */
-const CX = {L:42, E:288, cols:24, dz:1.3, gapX:32, gapY:20};
-const cellXY = (e) => [ (e%CX.cols) - (CX.cols-1)/2, Math.floor(e/CX.cols) - (CX.E/CX.cols-1)/2 ];
+/* cortex: the model itself. GLM-5.3-Flash drawn as a 45-layer tower: tokenizer/embedding at the bottom, then per layer the
+   attention block (34 KDA linear-attention layers as head plates, 11 DSA sparse-attention layers as context bars) and the MLP
+   (3 dense plates, then 42 MoE plates of 24x12 = 288 experts + 1 shared), the LM head/sampler on top and the MTP draft layer
+   beside it. Strands are this step's tokens (colour = request) through the experts they were routed to; rays are where the DSA
+   layers read in the context; the spine is the residual-stream magnitude per layer. */
+const MD = (() => {
+  const dsa = [3,7,11,15,19,23,27,31,35,39,43];
+  const kda = []; for (let l=0;l<45;l++) if (!dsa.includes(l)) kda.push(l);
+  return {L:45, dsa, kda, kdaSet:new Set(kda), dense:new Set([0,1,2]), E:288, cols:24, K:9, DY:0.95, W:12, D:6,
+          yOf: l => l*0.95, yEmb:-3.2, yHead:45*0.95+1.4, xMtp:12.5, zAttn:-4.8, xSpine:-7.8,
+          moeLayer: o => o < 42 ? 3+o : -1, dsaLayer: o => o < 11 ? dsa[o] : -1};
+})();
+const cellXZ = e => [ ((e%MD.cols) - (MD.cols-1)/2)*0.5, (Math.floor(e/MD.cols) - (MD.E/MD.cols-1)/2)*0.5 ];
+const plateOrigin = o => o < 42 ? {x:0, y:MD.yOf(3+o), z:0} : {x:MD.xMtp, y:MD.yHead, z:0};      // routing ordinal 42 = MTP layer
+const tokX = (t, n) => -6 + 12*(t+0.5)/Math.max(n,1);
+const binX = b => (b-31.5)*0.19;
 const reqHue = (id) => { let x=0; for (const ch of id) x=(x*31+ch.charCodeAt(0))>>>0; return (x%360)/360; };
-const BR = {byId:new Map(), order:[]};      // request id -> brain state
+function textSprite(scaleX, scaleY){ const cv = document.createElement("canvas"); cv.width = 1024; cv.height = 72; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(scaleX, scaleY, 1); sp.userData = {cv, tex, text: ""}; return sp; }
+function setText(sp, text, col, align){ if (sp.userData.text === text && sp.userData.col === col) return; const {cv, tex} = sp.userData, g = cv.getContext("2d");
+  g.clearRect(0,0,cv.width,cv.height); g.font = "500 30px 'IBM Plex Mono', monospace"; g.textBaseline = "middle";
+  let s = text; while (s.length > 4 && g.measureText(s).width > cv.width - 60) s = s.slice(0, -4) + "…";
+  const w = g.measureText(s).width + 52, x0 = align === "right" ? cv.width - w : 0;
+  g.fillStyle = "rgba(11,13,16,0.78)"; g.fillRect(x0, 10, w, 52); if (col){ g.fillStyle = col; g.fillRect(x0+10, 26, 18, 18); }
+  g.fillStyle = "#e8eef4"; g.fillText(s, x0 + (col ? 40 : 14), 36); tex.needsUpdate = true; sp.userData.text = text; sp.userData.col = col; }
 function initCortex(){
-  const o = mk3("cv3_cortex"); if (!o) return; o.rad = o.rad0 = 70; o.target.set(0, 0, -CX.dz*(CX.L-1)/2); o.brains = new Map(); S3.cortex = o;
+  const o = mk3("cv3_cortex"); if (!o) return; o.rad = o.rad0 = 66; o.theta = 0.62; o.phi = 1.28; o.target.set(1.0, MD.yOf(21), -1.0); S3.cortex = o;
+  const m = new THREE.Matrix4(), dim = new THREE.Color(0.012,0.016,0.022);
+  const inst = (geo, n, opacity=0.9) => { const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity, depthWrite:true}), n);   // solid plates: occlude, do not add
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3); for (let i=0;i<n;i++) mesh.setColorAt(i, dim); mesh.frustumCulled = false; o.s.add(mesh); return mesh; };
+  // MoE experts: 42 decoder plates + the MTP plate, 24 x 12 cells each
+  o.ex = inst(new THREE.BoxGeometry(0.42,0.2,0.42), 43*MD.E, 0.75);
+  for (let l=0;l<43;l++){ const p = plateOrigin(l); for (let e=0;e<MD.E;e++){ const [x,z]=cellXZ(e); m.makeTranslation(p.x+x, p.y, p.z+z); o.ex.setMatrixAt(l*MD.E+e, m); } }
+  o.ex.instanceMatrix.needsUpdate = true; o.hist = new Float32Array(43*MD.E);
+  // shared expert per MoE plate (right edge), dense MLP plates (layers 0-2)
+  o.sh = inst(new THREE.BoxGeometry(0.5,0.5,1.4), 43); for (let l=0;l<43;l++){ const p = plateOrigin(l); m.makeTranslation(p.x+6.6, p.y, p.z); o.sh.setMatrixAt(l, m); } o.sh.instanceMatrix.needsUpdate = true; o.shist = new Float32Array(43);
+  o.dn = inst(new THREE.BoxGeometry(MD.W,0.22,MD.D), 3, 0.7); for (let l=0;l<3;l++){ m.makeTranslation(0, MD.yOf(l), 0); o.dn.setMatrixAt(l, m); } o.dn.instanceMatrix.needsUpdate = true;
+  // attention blocks behind each plate: KDA head cells (16 per row) and DSA context bars (64 bins)
+  o.kd = inst(new THREE.BoxGeometry(0.62,0.26,0.42), MD.kda.length*64, 0.9);
+  MD.kda.forEach((l,i)=>{ for (let h=0;h<64;h++){ m.makeTranslation(((h%16)-7.5)*0.75, MD.yOf(l), MD.zAttn + 0.3 - Math.floor(h/16)*0.5); o.kd.setMatrixAt(i*64+h, m); } }); o.kd.instanceMatrix.needsUpdate = true; o.khist = new Float32Array(MD.kda.length*64);
+  o.at = inst(new THREE.BoxGeometry(0.16,0.3,1.1), 12*64, 0.95);
+  for (let l=0;l<12;l++){ const y = l < 11 ? MD.yOf(MD.dsaLayer(l)) : MD.yHead, x0 = l < 11 ? 0 : MD.xMtp; for (let b=0;b<64;b++){ m.makeTranslation(x0+binX(b), y, MD.zAttn); o.at.setMatrixAt(l*64+b, m); } }
+  o.at.instanceMatrix.needsUpdate = true; o.ahist = new Float32Array(12*64);
+  // residual spine, stage plates, token dots
+  o.sp = inst(new THREE.BoxGeometry(0.6, MD.DY*0.9, 0.6), 45, 0.8); for (let l=0;l<45;l++){ m.makeTranslation(MD.xSpine, MD.yOf(l), 0); o.sp.setMatrixAt(l, m); } o.sp.instanceMatrix.needsUpdate = true;
+  o.st = inst(new THREE.BoxGeometry(MD.W+1, 0.25, MD.D+1), 2, 0.6); m.makeTranslation(0, MD.yEmb, 0); o.st.setMatrixAt(0, m); m.makeTranslation(0, MD.yHead, 0); o.st.setMatrixAt(1, m); o.st.instanceMatrix.needsUpdate = true;
+  o.st.setColorAt(0, new THREE.Color(0.05,0.06,0.08)); o.st.setColorAt(1, new THREE.Color(0.05,0.06,0.08)); o.st.instanceColor.needsUpdate = true;
+  o.tk = inst(new THREE.SphereGeometry(0.28, 8, 6), 32, 1.0); o.tk.count = 0;
+  // strands (token -> expert -> expert ... -> head -> MTP) and attention rays (token -> context bin)
+  const mkLines = (cap, opacity) => { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap*6),3)); g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cap*6),3));
+    const ln = new THREE.LineSegments(g, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity}))); ln.frustumCulled = false; o.s.add(ln); return ln; };
+  o.strands = mkLines(32*8*48, 0.16); o.rays = mkLines(16*64*12, 0.22);
+  // static frame: plate outlines at the bottom/top, tower edges, MTP link
+  const fp = [], hx = MD.W/2+0.5, hz = MD.D/2+0.5;
+  for (const y of [MD.yEmb, MD.yHead]) fp.push(-hx,y,-hz, hx,y,-hz, hx,y,-hz, hx,y,hz, hx,y,hz, -hx,y,hz, -hx,y,hz, -hx,y,-hz);
+  for (const [x,z] of [[-hx,-hz],[hx,-hz],[hx,hz],[-hx,hz]]) fp.push(x,MD.yEmb,z, x,MD.yHead,z);
+  fp.push(hx, MD.yHead, 0, MD.xMtp-6.5, MD.yHead, 0);
+  const fg = new THREE.BufferGeometry(); fg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fp),3)); o.s.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({color:0x232a34})));
+  // labels
+  const lab = (text, x, y, z, sx=13, sy=0.95, align) => { const sp = textSprite(sx, sy); setText(sp, text, null, align); sp.position.set(x,y,z); o.s.add(sp); return sp; };
+  lab("tokenizer → embedding", -6.5, MD.yEmb-1.0, 4.0, 16, 1.15);
+  lab("LM head → sampler", -6.5, MD.yHead+1.1, 4.0, 16, 1.15);
+  lab("MTP draft layer (×4)", MD.xMtp, MD.yHead+1.6, 3.2, 14, 1.05);
+  lab("residual stream", MD.xSpine-1.5, MD.yOf(45)+0.6, 0, 12, 0.95);
+  lab("attention: kda heads / dsa context bins", 0, MD.yOf(45)+0.6, MD.zAttn, 20, 1.05);
+  for (let l=0;l<45;l+=5) lab(`L${l} · ${MD.kdaSet.has(l) ? "kda" : "dsa"} + ${MD.dense.has(l) ? "dense" : "moe"}`, -13.5, MD.yOf(l), 0, 13, 1.0);
+  o.tin = []; o.tout = [];      // token-text sprites (per request), created on demand
 }
-function newBrain(o, id){
-  const geo = new THREE.BoxGeometry(0.46, 0.46, 0.26); const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial(addMat({opacity:0.7})), CX.L*CX.E);
-  const m = new THREE.Matrix4(), col = new THREE.Color(0.02,0.03,0.04);
-  for (let l=0;l<CX.L;l++) for (let e=0;e<CX.E;e++){ const [x,y]=cellXY(e); m.makeTranslation(x, y, -l*CX.dz); mesh.setMatrixAt(l*CX.E+e, m); mesh.setColorAt(l*CX.E+e, col); }
-  mesh.instanceMatrix.needsUpdate = true;
-  const maxSeg = 16*9*(CX.L-1), pg = new THREE.BufferGeometry();
-  pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(maxSeg*2*3),3)); pg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(maxSeg*2*3),3));
-  const paths = new THREE.LineSegments(pg, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity:0.35}))); paths.frustumCulled = false;
-  const fg = new THREE.BufferGeometry(); const fp=[]; const hx=CX.cols/2, hy=(CX.E/CX.cols)/2;
-  for (const l of [0, CX.L-1]){ const z=-l*CX.dz; fp.push(-hx,-hy,z, hx,-hy,z, hx,-hy,z, hx,hy,z, hx,hy,z, -hx,hy,z, -hx,hy,z, -hx,-hy,z); }
-  fg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fp),3));
-  const grp = new THREE.Group(); grp.add(mesh); grp.add(paths); grp.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({color:0x2a323d}))); o.s.add(grp);
-  return {id, grp, mesh, paths, hist:new Float32Array(CX.L*CX.E), seen:Date.now(), hue:reqHue(id), tokens:0};
-}
-function layoutBrains(o){
-  const list = [...o.brains.values()].sort((a,b)=> a.id<b.id?-1:1), n = list.length || 1, cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n/cols);
-  list.forEach((b,i)=>{ const cx=(i%cols)-(cols-1)/2, cy=(rows-1)/2-Math.floor(i/cols); b.grp.position.set(cx*CX.gapX, cy*CX.gapY, 0); });
-  o.rad0 = 62 + Math.max(cols, rows)*22; if (!o.drag && Date.now()-o.lastDrag > 4000) o.rad += (o.rad0 - o.rad)*0.05;
-}
+function poolText3(o, list, n, y0, dir, x, z){ while (list.length < n){ const sp = textSprite(30, 1.7); o.s.add(sp); list.push(sp); } list.forEach((sp,i)=>{ sp.visible = i < n; if (i < n) sp.position.set(x, y0 + dir*(2.4 + i*1.7), z); }); }
 function drawCortex(){
   const o = S3.cortex; if (!o || !place(o)) return;
   const a = VIZ.a3;
   if (o.dirty && a){
-    const reqs = (a.reqs && a.reqs.length) ? a.reqs : [["all", 0, a.T3]];
-    const now = Date.now(), c = new THREE.Color(), rgb=[0,0,0], K=9, Lr=Math.min(a.n_moe, CX.L), T=a.T3;
-    for (const b of o.brains.values()){ for (let i=0;i<b.hist.length;i++) b.hist[i]*=0.82; b.tokens=0; }
-    for (const [id, start, count] of reqs){
-      let b = o.brains.get(id); if (!b){ b = newBrain(o, id); o.brains.set(id, b); layoutBrains(o); }
-      b.seen = now; b.tokens = count;
-      const pos = b.paths.geometry.attributes.position.array, cl = b.paths.geometry.attributes.color.array; let n=0;
-      const hc = new THREE.Color().setHSL(b.hue, 0.85, 0.6);
-      for (let t=start; t<Math.min(start+count, T); t++) for (let k=0;k<K;k++){
-        for (let l=0;l<Lr;l++){ const e=a.r3[(l*T+t)*K+k]; if (e>=0 && e<CX.E) b.hist[l*CX.E+e] = Math.min(1, b.hist[l*CX.E+e] + 0.35); }
-        for (let l=0;l<Lr-1 && n<16*9*(CX.L-1);l++){ const e0=a.r3[(l*T+t)*K+k], e1=a.r3[((l+1)*T+t)*K+k]; if (e0<0||e1<0||e0>=CX.E||e1>=CX.E) continue;
-          const [x0,y0]=cellXY(e0), [x1,y1]=cellXY(e1); pos.set([x0,y0,-l*CX.dz, x1,y1,-(l+1)*CX.dz], n*6); cl.set([hc.r,hc.g,hc.b, hc.r,hc.g,hc.b], n*6); n++; } }
-      b.paths.geometry.setDrawRange(0, n*2); b.paths.geometry.attributes.position.needsUpdate = true; b.paths.geometry.attributes.color.needsUpdate = true;
-    }
-    for (const [id, b] of [...o.brains]){ if (now - b.seen > 12000){ o.s.remove(b.grp); o.brains.delete(id); layoutBrains(o); continue; }
-      for (let i=0;i<b.hist.length;i++){ const v=b.hist[i]; if (v<0.03){ b.mesh.setColorAt(i, c.setRGB(0.006,0.008,0.011)); continue; } heat3(v*0.85, rgb); b.mesh.setColorAt(i, c.setRGB(rgb[0]*0.55, rgb[1]*0.55, rgb[2]*0.55)); }
-      b.mesh.instanceColor.needsUpdate = true; }
-    const live = [...o.brains.values()].filter(b=>b.tokens>0);
-    $("cx_sub").innerHTML = live.length ? live.map(b=>`<span style="color:hsl(${b.hue*360},85%,60%)">■</span> ${b.id} · ${b.tokens} tok`).join(" &nbsp; ") : "no requests in this step";
+    const T = a.T3, TA = a.TA, K = MD.K, nMoe = Math.min(a.n_moe, 43), nMla = Math.min(a.n_mla, 12), c = new THREE.Color(), rgb = [0,0,0];
+    const hues = tokenReqHue(a), hueOf = t => hues[t] || c.setHSL((t/Math.max(T,1))*0.85, 0.9, 0.6).clone();
+    // --- experts + shared: decay then add this step's routing
+    for (let i=0;i<o.hist.length;i++) o.hist[i] *= 0.82; for (let l=0;l<43;l++) o.shist[l] *= 0.82;
+    for (let l=0;l<nMoe;l++) for (let t=0;t<T;t++) for (let k=0;k<K;k++){ const e = a.r3[(l*T+t)*K+k]; if (e < 0) continue; if (e < MD.E) o.hist[l*MD.E+e] = Math.min(1, o.hist[l*MD.E+e] + 0.35); else o.shist[l] = Math.min(1, o.shist[l] + 0.2); }
+    for (let i=0;i<o.hist.length;i++){ const v = o.hist[i]; if (v < 0.03) o.ex.setColorAt(i, c.setRGB(0.05,0.06,0.075)); else { heat3(v*0.9, rgb); o.ex.setColorAt(i, c.setRGB(rgb[0]*0.85, rgb[1]*0.85, rgb[2]*0.85)); } }
+    for (let l=0;l<43;l++){ const v = o.shist[l]; o.sh.setColorAt(l, c.setRGB(0.05+0.7*v, 0.05+0.5*v, 0.02+0.1*v)); }
+    o.ex.instanceColor.needsUpdate = true; o.sh.instanceColor.needsUpdate = true;
+    // --- residual spine + per-layer contribution (dense plates, KDA fallback glow)
+    const rib = VIZ.rib.length ? VIZ.rib[VIZ.rib.length-1] : null; let mx = 1e-6, dmx = 1e-6; const delta = new Float32Array(45);
+    if (rib){ for (let l=0;l<45;l++){ if (rib[l] > mx) mx = rib[l]; delta[l] = Math.max(0, rib[l] - (l ? rib[l-1] : 0)); if (delta[l] > dmx) dmx = delta[l]; } }
+    for (let l=0;l<45;l++){ const v = rib ? rib[l]/mx : 0; o.sp.setColorAt(l, c.setRGB(0.08+0.85*v, 0.07+0.62*v, 0.02+0.12*v)); }
+    for (let l=0;l<3;l++){ const v = rib ? delta[l]/dmx : 0; o.dn.setColorAt(l, c.setRGB(0.04+0.25*v, 0.05+0.35*v, 0.07+0.25*v)); }
+    o.sp.instanceColor.needsUpdate = true; o.dn.instanceColor.needsUpdate = true;
+    // --- KDA heads: per-head output norms when the runtime sends them (after restart), else the layer's residual delta
+    const hh = a.kd && (()=>{ for (let i=0;i<MD.kda.length;i++) for (let h=32;h<64;h++) if (a.kd[MD.kda[i]*64+h] > 0) return 64; return 32; })() || 32;
+    o.kd.count = MD.kda.length*64;
+    for (let i=0;i<MD.kda.length;i++){ const l = MD.kda[i]; for (let h=0;h<64;h++){ const idx = i*64+h; let v = 0;
+        if (h < hh) v = a.kd ? a.kd[l*64+h]/255 : (rib ? delta[l]/dmx : 0); o.khist[idx] = Math.max(o.khist[idx]*0.75, v);
+        const w = h < hh ? o.khist[idx] : 0; o.kd.setColorAt(idx, h < hh ? c.setRGB(0.03+0.25*w, 0.06+0.75*w, 0.09+0.7*w) : c.setRGB(0,0,0)); } }
+    o.kd.instanceColor.needsUpdate = true;
+    // --- DSA context bars + rays from the reading token to the bins it attends
+    const rp = o.rays.geometry.attributes.position.array, rc = o.rays.geometry.attributes.color.array; let nr = 0; const B = a.bins;
+    for (let i=0;i<o.ahist.length;i++) o.ahist[i] *= 0.7;
+    for (let l=0;l<nMla;l++){ const y = l < 11 ? MD.yOf(MD.dsaLayer(l)) : MD.yHead, x0 = l < 11 ? 0 : MD.xMtp;
+      for (let t=0;t<TA;t++){ const hc = hueOf(t), xt = x0 + tokX(t, TA)*0.9;
+        for (let b=0;b<B&&b<64;b++){ const v = a.at[(l*TA+t)*B+b]/255; if (v > o.ahist[l*64+b]) o.ahist[l*64+b] = v;
+          if (v > 0.45 && nr < 16*64*12){ rp.set([xt, y+0.35, 1.2, x0+binX(b), y, MD.zAttn], nr*6); rc.set([hc.r*v*0.8, hc.g*v*0.8, hc.b*v*0.8, hc.r*v, hc.g*v, hc.b*v], nr*6); nr++; } } } }
+    for (let i=0;i<12*64;i++){ const v = i < nMla*64 ? o.ahist[i] : 0; o.at.setColorAt(i, c.setRGB(0.03+0.3*v, 0.05+0.6*v, 0.08+0.95*v)); }
+    o.at.instanceColor.needsUpdate = true; o.rays.geometry.setDrawRange(0, nr*2); o.rays.geometry.attributes.position.needsUpdate = true; o.rays.geometry.attributes.color.needsUpdate = true;
+    // --- token dots + strands through the experts each token was routed to
+    const m = new THREE.Matrix4(); o.tk.count = Math.min(T, 32);
+    for (let t=0;t<o.tk.count;t++){ m.makeTranslation(tokX(t,T), MD.yEmb+0.45, 0); o.tk.setMatrixAt(t, m); o.tk.setColorAt(t, hueOf(t)); }
+    o.tk.instanceMatrix.needsUpdate = true; o.tk.instanceColor.needsUpdate = true;
+    const sp = o.strands.geometry.attributes.position.array, sc = o.strands.geometry.attributes.color.array; let ns = 0; const cap = 32*8*48;
+    const seg = (x0,y0,z0,x1,y1,z1,hc,w) => { if (ns >= cap) return; sp.set([x0,y0,z0,x1,y1,z1], ns*6); sc.set([hc.r*w,hc.g*w,hc.b*w, hc.r*w,hc.g*w,hc.b*w], ns*6); ns++; };
+    for (let t=0;t<Math.min(T,32);t++){ const hc = hueOf(t), xt = tokX(t,T);
+      for (let k=0;k<8;k++){ let px = xt, py = MD.yEmb+0.45, pz = 0;
+        for (let l=0;l<45;l++){ let x, z; if (MD.dense.has(l)){ x = xt*0.35; z = (k-3.5)*0.4; } else { const ord = l-3; if (ord >= nMoe) continue; const e = a.r3[(ord*T+t)*K+k]; if (e < 0 || e >= MD.E) continue; [x,z] = cellXZ(e); }
+          seg(px,py,pz, x,MD.yOf(l),z, hc, 0.9); px = x; py = MD.yOf(l); pz = z; }
+        seg(px,py,pz, xt*0.5, MD.yHead, 0, hc, 0.9);
+        if (nMoe > 42){ const e = a.r3[(42*T+t)*K+k]; if (e >= 0 && e < MD.E){ const [x,z] = cellXZ(e); seg(xt*0.5, MD.yHead, 0, MD.xMtp+x, MD.yHead, z, hc, 0.5); } } } }
+    o.strands.geometry.setDrawRange(0, ns*2); o.strands.geometry.attributes.position.needsUpdate = true; o.strands.geometry.attributes.color.needsUpdate = true;
+    // --- token text: what entered the tokenizer/embedding this step and what the sampler emitted (ids only until the runtime sends pieces)
+    const tin = (a.tok && a.tok.in && a.tok.in.length) ? a.tok.in.map(([id,n,f,l]) => [id, `${id} · ${n} tok  ${f.join("")}${l.length ? " … " + l.join("") : ""}`])
+                                                       : (a.reqs||[]).map(([id,s,n]) => [id, `${id} · ${n} tok`]);
+    const tout = (a.tok && a.tok.out) ? a.tok.out.map(([id,p]) => [id, `${id} → ${p.join("")}`]) : [];
+    poolText3(o, o.tin, Math.min(tin.length, 8), MD.yEmb, -1, 0, 4.0); tin.slice(0,8).forEach(([id,txt],i) => setText(o.tin[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
+    poolText3(o, o.tout, Math.min(tout.length, 8), MD.yHead, 1, 0, 4.0); tout.slice(0,8).forEach(([id,txt],i) => setText(o.tout[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
+    const reqs = (a.reqs||[]); $("cx_sub").innerHTML = (reqs.length ? reqs.map(([id,s,n]) => `<span style="color:hsl(${reqHue(id)*360},85%,60%)">■</span> ${id} · ${n} tok`).join(" &nbsp; ") : "no tokens this step")
+      + ` &nbsp;·&nbsp; 45 layers (34 kda + 11 dsa) · 42 moe × 288 + shared · ${a.tok ? "" : "token text + kda heads after next restart · "}drag to orbit`;
     o.dirty = false;
   }
-  if (o.brains.size) layoutBrains(o);
   o.r.render(o.s, o.c);
 }
 /* attention volume: points at (context bin, token, layer) */

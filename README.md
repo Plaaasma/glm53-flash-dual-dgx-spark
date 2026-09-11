@@ -341,7 +341,18 @@ Verify the guard rails: `MemAvailable` ≥ 3 GiB on both nodes
 `dashboard/` is a zero-dependency live dashboard (vLLM metrics + per-node
 GPU/memory/network): run `agent.py` on both nodes (port 9101), `collector.py`
 on the head (port 9102), and serve `index.html` (e.g.
-`python3 -m http.server 3000`). It understands vLLM's metric quirks on this
+`python3 -m http.server 3000`).
+
+The 3-D "cortex" panel draws the model itself rather than a cuboid: tokenizer/embedding
+at the bottom, the 45 decoder layers as plates (34 KDA linear-attention layers with per-head
+cells, 11 DSA sparse-attention layers with 64 context bins and rays from the reading token to
+the bins it selects; 3 dense MLP plates, then 42 MoE plates of 24x12 = 288 experts plus the
+shared expert), the residual-stream spine on the left, the LM head/sampler on top and the MTP
+draft layer beside it. Strands are the step's tokens through the experts they were routed to,
+coloured by request. The runtime (`nvfp4-kv/glm53_viz_runtime.py`, hooks in
+`kit-patches/patch_viz_hooks.py`) additionally sends per-head KDA output norms (`kda`) and the
+token pieces entering and leaving the model (`tok`, decoded with the `tokenizers` library from
+the model's `tokenizer.json`); the page degrades to ids/counts when a frame lacks them. It understands vLLM's metric quirks on this
 stack — e.g. deriving *live* prefill throughput from the per-step iteration
 histogram, because `prompt_tokens_total` only updates at request completion.
 

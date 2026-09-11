@@ -13,7 +13,7 @@ the buffers into small histograms and sends one UDP datagram (JSON) to the
 collector. Everything is gated on env GLM53_VIZ=1 and degrades to no-ops.
 Overhead budget: ~60 memcpy nodes + (ribbon) ~3 tiny kernels/layer per step.
 """
-import base64, json, os, socket, threading, time
+import base64, json, os, re as _re, socket, threading, time
 import numpy as np
 import torch
 
@@ -24,6 +24,9 @@ _HZ = float(os.environ.get("GLM53_VIZ_HZ", "12"))
 MAX_T = int(os.environ.get("GLM53_VIZ_MAX_T", "256"))   # tokens per step we record (decode+mixed steps)
 N_EXPERTS, TOPK, N_MOE, N_MLA, N_ALL, TOPK_ATTN, ATTN_BINS = 288, 9, 43, 13, 46, 2048, 256
 MAX_T3, MAX_TA, ATTN3_BINS = 32, 16, 64      # per-token 3D frame: routing tokens, attention tokens, context bins
+KDA_HEADS = 64                             # per-KDA-layer head slots (a TP rank holds 32 of the 64 heads)
+TOK_EDGE = int(os.environ.get("GLM53_VIZ_TOK_EDGE", "6"))   # token pieces shown per request per step (head + tail)
+_TOKENIZER = os.environ.get("GLM53_VIZ_TOKENIZER", "")      # tokenizer.json path; derived from the model dir when empty
 
 
 def enabled() -> bool:
@@ -35,6 +38,13 @@ class _State:
         self.ready = False
         self.lock = threading.Lock()
         self.moe_ord: dict = {}     # layer identity -> ordinal (first-call order)
+        self.kda_ord: dict = {}     # KDA layer prefix -> layer index
+        self.sampled: list = []     # [(req8, [ids])] from the last sampling
+        self.sampled_step = -1
+        self.step_seen = 0
+        self.batch_T = 0
+        self.tok = None            # tokenizers.Tokenizer (lazy, publisher thread)
+        self.tok_tried = False
         self.mla_ord: dict = {}
         self.rank = -1
         self.capture_seen = 0.0     # last time a hook ran inside a CUDA graph capture
@@ -60,6 +70,8 @@ class _State:
             self.d_routing = dz(N_MOE, MAX_T, TOPK)
             self.d_attn = dz(N_MLA, MAX_T, TOPK_ATTN)
             self.d_ribbon = dz(N_ALL, dt=torch.float32)
+            self.d_kda = dz((N_ALL, KDA_HEADS), dt=torch.float32)     # per-KDA-layer head output norms
+            self.d_in = dz(MAX_T, dt=torch.int32)                     # this step's input token ids
             self.d_meta = dz(4)                        # [step, T, -, -]
             self.d_h3 = dz(MAX_T, 3, dt=torch.float32) # final hidden state, random-projected to 3D
             self.h_h3 = None                           # pinned twin, created with the others below
@@ -69,9 +81,11 @@ class _State:
             self.h_routing = pin(N_MOE, MAX_T, TOPK)
             self.h_attn = pin(N_MLA, MAX_T, TOPK_ATTN)
             self.h_ribbon = pin(N_ALL, dt=torch.float32)
+            self.h_kda = pin((N_ALL, KDA_HEADS), dt=torch.float32)
+            self.h_in = pin(MAX_T, dt=torch.int32)
             self.h_meta = pin(4)
             self.h_h3 = pin(MAX_T, 3, dt=torch.float32)
-            for nm in ("h_routing", "h_attn", "h_ribbon", "h_meta", "h_h3"):
+            for nm in ("h_routing", "h_attn", "h_ribbon", "h_meta", "h_h3", "h_kda", "h_in"):
                 b = getattr(self, nm)
                 if not b.is_pinned():
                     setattr(self, nm, b.pin_memory())
@@ -178,6 +192,35 @@ _MAINT_EMPTY = os.environ.get("GLM53_MEM_MAINT_EMPTY_CACHE", "1") == "1"
 _maint_last = [time.time()]
 
 
+def record_kda(layer_key, core_out: torch.Tensor) -> None:
+    """Per-head output norm of one KDA (linear attention) layer: core_out [1, T, H, D] -> [H] (2 tiny kernels)."""
+    if not _ON or _DEAD or not _RIBBON or not S.ready:
+        return
+    try:
+        idx = S.kda_ord.get(layer_key)
+        if idx is None:
+            m = _re.search(r"layers\.(\d+)", str(layer_key))
+            idx = int(m.group(1)) if m else _ordinal(S.kda_ord, layer_key, N_ALL)
+            S.kda_ord[layer_key] = idx
+        if idx >= N_ALL:
+            return
+        h = min(core_out.shape[-2], KDA_HEADS)
+        S.d_kda[idx, :h].copy_(core_out.detach().float().norm(dim=-1).mean(dim=tuple(range(core_out.dim() - 2)))[:h])
+    except Exception as e:
+        _disarm("record_kda", e)
+
+
+def record_sampled(req_ids, sampled) -> None:
+    """Sampled token ids of the step (CPU lists, after the async D2H copy): [(req8, [ids...]), ...]."""
+    if not _ON or _DEAD:
+        return
+    try:
+        S.sampled = [(str(r)[-8:], [int(x) for x in ids][:8]) for r, ids in zip(req_ids, sampled) if ids]
+        S.sampled_step = S.step_seen
+    except Exception as e:
+        _disarm("record_sampled", e)
+
+
 def _mem_maint() -> None:
     """Every GLM53_MEM_MAINT_S: log process/host/torch memory (both ranks) and, unless a
     capture is in progress, return caching-allocator slack. Added 2026-09-05 after both
@@ -225,6 +268,11 @@ def set_batch(input_batch) -> None:
         ids = list(input_batch.req_ids)[: input_batch.num_reqs]
         qsl = input_batch.query_start_loc_np
         S.batch = [(str(r)[-8:], int(qsl[i]), int(qsl[i + 1] - qsl[i])) for i, r in enumerate(ids)]
+        S.step_seen += 1
+        if S.ready:
+            t = min(int(input_batch.num_tokens), MAX_T)
+            S.d_in[:t].copy_(input_batch.input_ids[:t].to(torch.int32))
+            S.batch_T = t
     except Exception as e:
         _disarm("set_batch", e)
 
@@ -301,7 +349,62 @@ def _fold3d(state: _State, T: int, n_moe: int, n_mla: int) -> dict:
             "reqs": [list(b) for b in state.batch if b[1] < T3],
             "routing3d": base64.b64encode(r.tobytes()).decode(),
             "attn3d": base64.b64encode(ah[:n_mla, :TA].tobytes()).decode(),
-            "h3": base64.b64encode(h3.tobytes()).decode()}
+            "h3": base64.b64encode(h3.tobytes()).decode(),
+            "kda": _fold_kda(state), "tok": _fold_tokens(state, T)}
+
+
+def _fold_kda(state: _State) -> str:
+    """Per-layer, per-head output norms scaled to uint8 by the layer's max: [N_ALL, KDA_HEADS]."""
+    k = state.h_kda.numpy().astype(np.float32)
+    mx = np.maximum(k.max(axis=1, keepdims=True), 1e-6)
+    return base64.b64encode(np.clip(k / mx * 255.0, 0, 255).astype(np.uint8).tobytes()).decode()
+
+
+def _tokenizer(state: _State):
+    if state.tok is None and not state.tok_tried:
+        state.tok_tried = True
+        try:
+            path = _TOKENIZER
+            if not path:
+                from vllm.config import get_current_vllm_config
+                cfg = get_current_vllm_config()
+                path = os.path.join(cfg.model_config.tokenizer or cfg.model_config.model, "tokenizer.json")
+            from tokenizers import Tokenizer
+            state.tok = Tokenizer.from_file(path)
+        except Exception:
+            state.tok = None
+    return state.tok
+
+
+def _pieces(tok, ids) -> list:
+    out = []
+    for i in ids:
+        try:
+            s = tok.id_to_token(int(i)) if tok is not None else None
+        except Exception:
+            s = None
+        if s is None:
+            s = f"#{int(i)}"
+        out.append(s.replace("\u0120", " ").replace("\u010a", "\u23ce").replace("\u0109", "\t")[:24])
+    return out
+
+
+def _fold_tokens(state: _State, T: int) -> dict:
+    """Token pieces entering (per request span of this step) and leaving (last sampling) the model."""
+    tok = _tokenizer(state)
+    ids = state.h_in.numpy()
+    t_all = max(0, min(state.batch_T, MAX_T))
+    inp = []
+    for req8, start, count in state.batch:
+        if start >= t_all:
+            continue
+        span = ids[start : min(start + count, t_all)].tolist()
+        if len(span) <= 2 * TOK_EDGE:
+            inp.append([req8, int(count), _pieces(tok, span), []])
+        else:
+            inp.append([req8, int(count), _pieces(tok, span[:TOK_EDGE]), _pieces(tok, span[-TOK_EDGE:])])
+    out = [[req8, _pieces(tok, sid)] for req8, sid in state.sampled]
+    return {"in": inp, "out": out, "vocab": (tok.get_vocab_size() if tok is not None else None)}
 
 
 def _publisher(state: _State) -> None:
@@ -345,6 +448,8 @@ def _publisher(state: _State) -> None:
                 state.h_routing[:n_moe, :T].copy_(state.d_routing[:n_moe, :T], non_blocking=True)
                 state.h_attn[:n_mla, :T].copy_(state.d_attn[:n_mla, :T], non_blocking=True)
                 state.h_ribbon.copy_(state.d_ribbon, non_blocking=True)
+                state.h_kda.copy_(state.d_kda, non_blocking=True)
+                state.h_in.copy_(state.d_in, non_blocking=True)
                 state.h_h3.copy_(state.d_h3, non_blocking=True)
             state.pub_stream.synchronize()
             frame = _fold(state, T, n_moe, n_mla)

@@ -82,6 +82,20 @@ def main() -> int:
           "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-batch\n"
           "        _viz.set_batch(input_batch)\n",
           "viz-batch")
+    # 3e) per-head KDA output norms (linear-attention layers), after the o_norm
+    patch(V / "models/glm5next/nvidia/kda.py",
+          "        core_attn_out = self.o_norm(core_attn_out, g2)\n",
+          "        core_attn_out = self.o_norm(core_attn_out, g2)\n"
+          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-kda\n"
+          "        _viz.record_kda(self.prefix, core_attn_out)\n",
+          "viz-kda")
+    # 3f) sampled token ids once the async D2H copy has landed (CPU lists)
+    patch(V / "v1/worker/gpu/async_utils.py",
+          "        self.model_runner_output.sampled_token_ids = sampled_token_ids\n",
+          "        self.model_runner_output.sampled_token_ids = sampled_token_ids\n"
+          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-sampled\n"
+          "        _viz.record_sampled(self.model_runner_output.req_ids, sampled_token_ids)\n",
+          "viz-sampled")
     # 4) scheduler snapshot
     s = V / "v1/core/sched/scheduler.py"
     helper = '''
