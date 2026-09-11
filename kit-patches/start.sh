@@ -264,6 +264,7 @@ GLM53_MM_COLD_MAX="${GLM53_MM_COLD_MAX:-24}"
 # Mamba/KDA prefix-cache checkpoint spacing in tokens (vLLM env). Empty = dense = one cached state page per 7936-token page
 # per KDA group (3 groups) -> the 310-page pool caches only ~600K conversation tokens. 63488 = every 8 pages.
 VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-}"
+VLLM_SPARSE_INDEXER_MAX_LOGITS_MB="${VLLM_SPARSE_INDEXER_MAX_LOGITS_MB:-}"
 # HF image preprocessing chunk (images per HF call; bounds the host-memory peak of cold many-image requests)
 GLM53_MM_CHUNK="${GLM53_MM_CHUNK:-4}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
@@ -1281,6 +1282,7 @@ launch_cluster() {
         -e "GLM53_MM_CAP_BATCH=$GLM53_MM_CAP_BATCH"
         -e "GLM53_MM_COLD_MAX=$GLM53_MM_COLD_MAX"
         $( [ -n "$VLLM_PREFIX_CACHE_RETENTION_INTERVAL" ] && echo "-e VLLM_PREFIX_CACHE_RETENTION_INTERVAL=$VLLM_PREFIX_CACHE_RETENTION_INTERVAL" ) \
+        $( [ -n "$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" ] && echo "-e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" ) \
         -e "GLM53_MM_CHUNK=$GLM53_MM_CHUNK"
         -e "GLM53_IT_LOCAL_READS=$GLM53_IT_LOCAL_READS"
         -e "GLM53_LOAD_DIAG=$GLM53_LOAD_DIAG"
@@ -1342,6 +1344,9 @@ launch_cluster() {
     # generic loop so the key never shows in process listings of either node
     # beyond the container env (same as the DeepSeek deployment).
     serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
+    # The sparse-MLA indexer runs on both TP ranks; forward its prefill logits budget only when set
+    # (vLLM int()-parses the value, so an empty string would crash the worker at first use).
+    [ -n "$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" ] && serve_env+=" -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB"
 
     log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
     worker_ssh "docker run -d --name '$CONTAINER_WORKER' \

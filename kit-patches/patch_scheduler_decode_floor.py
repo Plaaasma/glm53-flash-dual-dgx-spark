@@ -91,7 +91,7 @@ def _glm53_mixed_prefill_policy(running, current):
         if ctx > 0:
             c = budget // ctx
             if c < 2048:
-                ctx_cap = max(256, (c // 128) * 128)
+                ctx_cap = max(128, (c // 128) * 128)
     if n_decoding == 0:
         return ctx_cap
     if raw == "ladder":

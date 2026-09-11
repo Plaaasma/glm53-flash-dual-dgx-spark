@@ -201,12 +201,17 @@ def _mem_maint() -> None:
                 if l.startswith("MemAvailable"):
                     avail = int(l.split()[1]) // 1024; break
         a0, r0 = torch.cuda.memory_allocated() / 2**20, torch.cuda.memory_reserved() / 2**20
+        peak = torch.cuda.max_memory_allocated() / 2**20          # highest torch allocation since the last tick
         released = 0.0
         if _MAINT_EMPTY and not torch.cuda.is_current_stream_capturing():
             gc.collect(); torch.cuda.empty_cache()
             released = r0 - torch.cuda.memory_reserved() / 2**20
-        log.info("[glm53-mem] MemAvailable=%d MiB | proc VmRSS=%s RssAnon=%s RssShmem=%s VmSwap=%s MiB | torch allocated=%.0f reserved=%.0f MiB | empty_cache released %.0f MiB",
-                 avail, st.get("VmRSS"), st.get("RssAnon"), st.get("RssShmem"), st.get("VmSwap"), a0, r0, released)
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+        log.info("[glm53-mem] MemAvailable=%d MiB | proc VmRSS=%s RssAnon=%s RssShmem=%s VmSwap=%s MiB | torch allocated=%.0f peak=%.0f (+%.0f transient) reserved=%.0f MiB | empty_cache released %.0f MiB",
+                 avail, st.get("VmRSS"), st.get("RssAnon"), st.get("RssShmem"), st.get("VmSwap"), a0, peak, peak - a0, r0, released)
     except Exception:
         pass
 

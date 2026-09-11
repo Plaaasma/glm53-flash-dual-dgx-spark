@@ -109,8 +109,9 @@ from the vLLM container whenever MemAvailable drops under 2.5 GiB:
 ```
 It exists because a 468K-token session prefilling with uncapped 2048-token chunks drained the head from 3.4 GiB
 to the watchdog line in under 15 minutes (the sparse-MLA indexer's per-step scratch scales with chunk x context).
-The in-engine allocator maintenance now runs every 60 s (`GLM53_MEM_MAINT_S=60`), the multimodal processor
-cache is 0.5 GiB and the cold-image budget 16, all to keep the head's structural headroom (~3.5 GiB) usable.
+The in-engine allocator maintenance now runs every 30 s (`GLM53_MEM_MAINT_S=30`) and logs the torch
+allocation peak since the previous tick (`peak=... (+N transient)`), the multimodal processor cache is 1 GiB
+and the cold-image budget 16, all to keep the head's structural headroom (~3.5 GiB) usable.
 
 **Long-running headroom.** The post-boot headroom is not permanent: over ~14 h
 of deep-context serving both nodes crept up ~0.17 GiB/h (reclaimed cold pages
@@ -198,6 +199,18 @@ stays bounded: full 2048-token chunks below ~146K tokens of context, 896 at 300K
 cost is flat above ~256-token chunks, so throughput at deep context barely changes. The mixed-prefill ladder is
 applied on top. `kit-patches/patch_apc_probe.py` adds a per-group prefix-cache hit log for prompts over ~96K
 tokens, to tell a prompt change from an evicted KDA state.
+
+**What the indexer scratch actually is (2026-09-10, fourth trip at 702K).** The per-sub-chunk logits tensor is
+fp32 `[query rows x context]`, and vLLM already sub-chunks the query rows so it never exceeds
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB` (default 512 MiB); the top-k runs in place with a 1 MiB workspace and the
+K gather uses a persistent workspace. So the torch-side transient is bounded at ~0.5-0.6 GiB per step, which is
+exactly what every maintenance tick released at 700K. The rest of the swing the head showed before the trip
+(MemAvailable 1.4-5.7 GiB between ticks) was host-side: the worker process's ~1 GiB anonymous working set being
+pushed to zram by the one-minute reclaim and faulted straight back. Two settings follow from that:
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` (both TP ranks; smaller sub-chunks, same total work) and, as a stopgap
+until the peak log confirms the per-step maximum at deep context, `GLM53_PREFILL_CHUNK_CTX_BUDGET=80000000`
+with a 128-token floor: chunks 1024 at 80K, 512 at 150K, 256 at 300K, 128 from 500K. Prefill at 500K+ costs
+about 250 tok/s under that floor; restore 3e8 once the peak line shows headroom.
 
 ### 1.8 Why idle sessions went cold: the KV pool is 310 page IDs shared by four cache groups
 
