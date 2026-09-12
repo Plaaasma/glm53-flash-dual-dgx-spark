@@ -23,7 +23,7 @@ placeholder and, since they never enter the seen-set, stay dropped on later turn
 append-only after its first (cold) turn, up to the limit, without ever exceeding the cold budget.
 
 Runtime knobs: GLM53_MM_CAP=0 disables the pass (request then fails the way upstream does);
-GLM53_MM_CAP_BATCH=16 batch size for over-limit dropping; GLM53_MM_COLD_MAX=24 never-seen images per request
+GLM53_MM_CAP_BATCH=16 batch size for over-limit dropping; GLM53_MM_COLD_MAX=16 never-seen images per request
 (0 = no cold guard).
 Fail closed if the vLLM seams drift.
 """

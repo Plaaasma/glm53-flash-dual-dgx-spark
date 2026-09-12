@@ -191,6 +191,7 @@ EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-/home/liam/glm53/nvfp4-vllm/exl3-mt/glm53_exl3
 MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 MMCHUNK_PATCH_HOST="${MMCHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_chunk.py}"
 APCPROBE_PATCH_HOST="${APCPROBE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_probe.py}"
+APCREFRESH_PATCH_HOST="${APCREFRESH_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_refresh.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
@@ -1039,6 +1040,9 @@ fi
 if [ -f /opt/glm53/patch_apc_probe.py ]; then
     python3 /opt/glm53/patch_apc_probe.py
 fi
+if [ -f /opt/glm53/patch_apc_refresh.py ]; then
+    python3 /opt/glm53/patch_apc_refresh.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1176,6 +1180,9 @@ fi
 if [ -f /opt/glm53/patch_apc_probe.py ]; then
     python3 /opt/glm53/patch_apc_probe.py
 fi
+if [ -f /opt/glm53/patch_apc_refresh.py ]; then
+    python3 /opt/glm53/patch_apc_refresh.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1258,6 +1265,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
     scp -q -o BatchMode=yes "$MMCHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_chunk.py"
     scp -q -o BatchMode=yes "$APCPROBE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_probe.py"
+    scp -q -o BatchMode=yes "$APCREFRESH_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_refresh.py"
     [ -f "$EXL3MT_SO_HOST" ] && scp -q -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
     scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1399,6 +1407,7 @@ launch_cluster() {
         -v '/tmp/patch_mm_cap.py:/opt/glm53/patch_mm_cap.py:ro' \
         -v '/tmp/patch_mm_chunk.py:/opt/glm53/patch_mm_chunk.py:ro' \
         -v '/tmp/patch_apc_probe.py:/opt/glm53/patch_apc_probe.py:ro' \
+        -v '/tmp/patch_apc_refresh.py:/opt/glm53/patch_apc_refresh.py:ro' \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_mt.so:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
@@ -1445,6 +1454,7 @@ launch_cluster() {
         -v "$MMCAP_PATCH_HOST:/opt/glm53/patch_mm_cap.py:ro" \
         -v "$MMCHUNK_PATCH_HOST:/opt/glm53/patch_mm_chunk.py:ro" \
         -v "$APCPROBE_PATCH_HOST:/opt/glm53/patch_apc_probe.py:ro" \
+        -v "$APCREFRESH_PATCH_HOST:/opt/glm53/patch_apc_refresh.py:ro" \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v $EXL3MT_SO_HOST:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v "$LOADDIAG_PATCH_HOST:/opt/glm53/patch_load_diag.py:ro" \
         -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \

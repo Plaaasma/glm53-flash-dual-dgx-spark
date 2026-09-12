@@ -41,7 +41,7 @@ Measured speeds: section 8 (production logs, 2026-09-10/11) and
 | Speculative decode | `SPEC_METHOD=mtp`, `MTP_TOKENS=3`, dynamic `[[1,2,3],[3,16,2]]` (3 drafts at 1-2 streams, 2 at 3-16) |
 | Prefill | `GLM53_EXL3_MT=1` variant 8 (auto), ladder `1:1024,2:512,4:256,*:128`, `GLM53_PREFILL_CHUNK_CTX_BUDGET=3e8`, `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` |
 | Prefix cache | `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=63488` (KDA checkpoint every 8 pages) |
-| Multimodal | 128 images per prompt, `max_image_tokens=1024` (1008 per 1080p), lru processor cache 1 GiB, chunks of 4, 16 cold images per request |
+| Multimodal | 800 images per prompt, `max_image_tokens=1024` (1008 per 1080p), lru processor cache 1 GiB, chunks of 4, 16 cold images per request |
 | Memory guard | watchdog at 0.75 GiB, boot guard at 2.5 GiB, post-load/ready reclaim 4/3 GiB, cron reclaim 2 GiB every 20 min + every minute under 2.5 GiB, in-engine maintenance every 30 s |
 | Boot | launch → healthy 249-346 s over the last 17 boots (typical ~290 s) |
 | Ports | API 8888, dashboard + JSON 3000, collector 9102, node agents 9101, viz UDP 9103 |
@@ -181,9 +181,13 @@ messages server-side (dropping an old screenshot, a placeholder whose text chang
 token back to that point and forces a re-prefill of everything after it; in a 334K-token session that was
 ~250K tokens per `read_image` call at the 128-token mixed rate, about 15 minutes. So the design is:
 
-1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 128 images (about 129K tokens at
-   1024 tokens each). Above that, `kit-patches/patch_mm_cap.py` keeps the newest ones in batches of
-   `GLM53_MM_CAP_BATCH` (16) with a constant placeholder, which is a rare fallback, not the steady state.
+1. **Do not drop images in normal operation.** `--limit-mm-per-prompt` is 800 images (up to 819K tokens at
+   1024 each, the most that fits inside the 900K context; it was 128 until 2026-09-11, when sessions started
+   hitting it and every 16th image beyond it forced a re-prefill of the whole context). Above the limit,
+   `kit-patches/patch_mm_cap.py` keeps the newest ones in batches of `GLM53_MM_CAP_BATCH` (16) with a constant
+   placeholder, which is now a theoretical fallback. The cost of a long image session is preprocessing, not
+   prefill: the 1 GiB processor cache holds ~107 processed images, and a prompt with more than that
+   re-preprocesses all of them every turn (~150 ms and ~95 MB transient each, chunked by 4).
 2. **Bound the memory instead.** The shipped image processor allows 8000 tokens per image;
    `--mm-processor-kwargs {"max_image_tokens":1024}` caps a 1080p screenshot at 1008 tokens. Cold
    preprocessing costs ~95 MB of host RAM per image (measured with vLLM's own processor) and upstream hands
@@ -268,9 +272,12 @@ is plain LRU by free time, and a hit refreshes every attention page but only the
 session's KDA checkpoints keep the age of its original prefill. Under a sub-agent fan-out they are the oldest
 blocks in the pool and go first, and losing them zeroes the hybrid hit: the scheduler's probe logged
 `final=0 longest=461312` (461K of attention cache present, no KDA state) 19 minutes after the session's last
-turn, followed by a full re-prefill. The fix in progress refreshes a session's KDA snapshots on every hit and
-logs evictions by group; until then, expect a main-agent context to go cold when a fan-out of ~8 sub-agents
-runs next to a second large session.
+turn, followed by a full re-prefill. `kit-patches/patch_apc_refresh.py` fixes the order: after every hit it
+moves the cached KDA state block of each page boundary in the hit prefix to the tail of the free queue (no
+reference taken), so a session's checkpoints age with the session and a partial eviction takes its attention
+tail pages first (a short partial re-prefill) instead of its checkpoints. It also logs evictions by cache
+group once a minute (`[glm53-apc] evicted cached blocks by group ...`). Staged 2026-09-11; active from the
+next restart.
 
 ### 1.9 Dashboard data as JSON on the same port
 
@@ -440,7 +447,7 @@ Rollback: `GLM53_NVFP4_KV=0` in `.env` + restart.
 | `Decode (num_tokens <= 64) must go through ...decode_dsv3_2` | scratch page geometry routed decode to the paged kernel | same fix as above |
 | head watchdog trips during prefill at 600-700K context | indexer logits scratch (≤512 MiB/step by default) + host swap churn on a node with 1-2 GiB headroom | `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128`, chunk budget 3e8 (section 1.76), pin lowered to 9.06 GB |
 | prefill ~230 tok/s at deep context | chunk budget too low (128-token chunks; the fixed per-step cost dominates) | never set `GLM53_PREFILL_CHUNK_CTX_BUDGET` below 3e8 |
-| a 460K session re-prefills from zero minutes after its last turn | its KDA checkpoints were the oldest blocks and got evicted during a fan-out (section 1.8) | fix in progress; keep concurrent large sessions to two |
+| a 460K session re-prefills from zero minutes after its last turn | its KDA checkpoints were the oldest blocks and got evicted during a fan-out (section 1.8) | `patch_apc_refresh.py` (keeps checkpoints young); keep concurrent large sessions to two |
 | server dies the moment you run a diagnostic inside the container | a `docker exec python3` that imports vLLM/torch costs ~1 GB and the watchdog counts it | read the image from a throwaway `docker run --rm` container with shell tools; never exec Python in the serving container |
 | 133 orphaned `/dev/shm/psm_*` segments, 690 MiB | watchdog kills never unlink vLLM's shared memory (`--ipc=host`) | `start.sh` runs `kit-patches/shm_cleanup.py` on both nodes at launch |
 
