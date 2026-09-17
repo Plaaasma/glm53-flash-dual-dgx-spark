@@ -311,16 +311,16 @@ does not (API server, engine core, desktop, this session): the worker sits at 9.
 head sits at 5.1. TP pins the same KV on both, so the head sets the pool. Every further GB of pool has to
 come from the co-tenant, the desktop, or the swapped-out process pages; the model itself is at its floor.
 
-### 1.10b Small wins staged for the next boot (2026-09-17, not yet measured)
+### 1.10b Small wins, measured on boot 35 (2026-09-17)
 
-Everything in the budget above that is not weights, KV, firmware or the co-tenant, with what it can give back
-on the head. Applied at the next restart; the first maintenance tick logs each one's real effect.
+Everything in the budget above that is not weights, KV, firmware or the co-tenant, with what it was expected to
+give back and what it did. Net: about 1 GB per node, the heap trim being the one that did not deliver.
 
 | expected | change | how |
 |---|---|---|
-| 0.7-1.0 GB | the vLLM processes' glibc heaps: worker 2.5 GB (2.2 GB swapped), engine core 0.5 GB, API server 0.5 GB of freed-but-retained chunks that cost ~1 GB as compressed zram | `malloc_trim(0)` at every maintenance tick in the worker and every 60 s in the engine core (`GLM53_MEM_MAINT_TRIM=1`; first call logs VmRSS/VmSwap before and after) |
+| expected 0.7-1.0 GB, **got 0.2** | the vLLM processes' glibc heaps: worker 2.5 GB (2.2 GB swapped), engine core 0.5 GB, API server 0.5 GB | `malloc_trim(0)` at every maintenance tick in the worker and every 60 s in the engine core (`GLM53_MEM_MAINT_TRIM=1`). Measured: worker 4 MiB released (its heap is live, cold data, not free chunks), engine core 219 MiB of swap released. Kept because it is free; do not expect more. |
 | 0.36 GB | indexer K-gather workspace 475 MB → 119 MB | `GLM53_INDEXER_PREFILL_MULT=1`: one 900K request needs 225K entries; multi-request prefill steps just chunk more |
-| 0.3-0.5 GB | zram store 1.97 GB for 5.8 GB of cold pages at lzo-rle | `host-setup/glm53-zram` re-creates the device with zstd and 10 GiB at each boot (the 6 GiB device was 99.5% full and spilling 1 GB into the file swap) |
+| 0.3-0.5 GB, **got ~0.45** | zram store 1.97 GB for 5.8 GB of cold pages at lzo-rle (2.9:1) | `host-setup/glm53-zram` re-creates the device with zstd and 10 GiB at each boot; measured 4.1-4.3:1, nothing spills to the file swap any more |
 | ~0.2 GB | caching-allocator slack regrowing between 30 s ticks | `GLM53_MEM_MAINT_S=15` |
 | 0.1-0.2 GB | CUDA-graph exec objects for batch sizes 3, 24 and 48 | capture sizes `1 2 4 8 16 32 64`; those batches pad to the next size |
 
@@ -337,6 +337,10 @@ tracking), NCCL's buffers (small for 2 ranks over one link), the vision tower an
 the KV bytes per token (MLA latent is already NVFP4; FP4 indexer keys need sm_100).
 
 ### 1.10c Node roles: run the head on the node without the desktop (2026-09-17)
+
+Measured on boot 35 (pin 6.5 GB = 1,467,692 tokens, engined at 9.8 GB on gx10 and 6.3 GB on SparkyPoo):
+gx10 as worker 4.6 GB available, SparkyPoo as head 9.2 GB. Normalised for the co-tenant, each node has
+~1.5-2 GB more than in the same role before the swap plus section 1.10b. Boot 133 s.
 
 The head (API server, engine core, rank 0) costs ~2 GB of host RAM that the worker does not, and on this
 pair the node with the desktop, the remote-desktop session and the co-tenant was also the head. Swapping
