@@ -119,6 +119,15 @@ body{
 #boot .track{height:6px;background:var(--ink);border:1px solid var(--line);margin:18px 0 8px;position:relative}
 #boot .fill{position:absolute;top:0;bottom:0;left:0;background:repeating-linear-gradient(90deg,var(--gold) 0 8px,#d9a53c 8px 16px);transition:width 1.2s}
 #boot .meta{display:flex;justify-content:space-between;font:500 11.5px 'IBM Plex Mono',monospace;color:var(--mut)}
+#boot .track .seg{position:absolute;top:-1px;bottom:-1px;width:1px;background:var(--line2)}
+#boot .stages{list-style:none;margin:14px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:4px 22px;font:500 11px 'IBM Plex Mono',monospace;color:var(--mut)}
+#boot .stages li{display:flex;gap:8px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#boot .stages li .n{color:var(--ghost);width:16px;flex:none}
+#boot .stages li .d{margin-left:auto;color:var(--ghost)}
+#boot .stages li.done{color:var(--mut)} #boot .stages li.done .n{color:var(--gold)}
+#boot .stages li.current{color:#e8eef4} #boot .stages li.current .n{color:var(--gold)}
+#boot .stages li.current .d{color:var(--gold)} #boot .stages li.late .d{color:var(--coral)}
+#boot.failed .fill{background:repeating-linear-gradient(90deg,var(--coral) 0 8px,#c9503f 8px 16px)}
 #charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:14px}
 @media(max-width:520px){#charts{grid-template-columns:1fr}}
 .panel{border:1px solid var(--line);background:var(--ink2);min-width:0}
@@ -251,8 +260,9 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
       <div class="bl">startup sequence</div>
       <h2 id="b_stage">—</h2>
       <div class="bs" id="b_sub"></div>
-      <div class="track"><div class="fill" id="b_fill" style="width:0%"></div></div>
+      <div class="track" id="b_track"><div class="fill" id="b_fill" style="width:0%"></div></div>
       <div class="meta"><span id="b_elapsed"></span><span id="b_pct"></span><span id="b_eta"></span></div>
+      <ol class="stages" id="b_stages"></ol>
     </div>
     <div id="ambient">
       <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
@@ -261,13 +271,13 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
         <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
         <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas><div id="kv3_legend" class="kvlegend" hidden></div></div>
+        <div class="apanel"><div class="ph"><h4 id="kv3_title">kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas><div id="kv3_legend" class="kvlegend" hidden></div></div>
       </div>
       <div id="agrid" hidden>
         <div class="apanel"><div class="ph"><h4>expert routing — 42 layers × 288 experts</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
         <div class="apanel"><div class="ph"><h4>attention scan — where each MLA layer reads</h4><span class="sub" id="scan_sub">context →</span></div><canvas id="cv_scan"></canvas></div>
         <div class="apanel"><div class="ph"><h4>residual stream — per-layer magnitude</h4><span class="sub" id="ribbon_sub">—</span></div><canvas id="cv_ribbon"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>kv pool — 2.1M tokens</h4><span class="sub" id="kv_sub">—</span></div><canvas id="cv_kv"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="kv_title">kv pool</h4><span class="sub" id="kv_sub">—</span></div><canvas id="cv_kv"></canvas></div>
       </div>
       <div id="gaugestrip"><div class="apanel"><div class="ph"><h4>reactor — bandwidth · power · thermals · clocks</h4><span class="sub" id="gauge_sub">—</span></div><canvas id="cv_gauge"></canvas></div></div>
     </div>
@@ -412,15 +422,26 @@ function renderRail(){
   if (d.model) $("mname").textContent = d.model;
   const bootEl = $("boot");
   if (!d.engine_up && boot){
-    bootEl.className = "show";
-    $("b_stage").textContent = boot.stage;
-    $("b_fill").style.width = (boot.pct||0)+"%";
-    $("b_pct").textContent = (boot.pct||0)+"%";
+    bootEl.className = "show" + (boot.failed ? " failed" : "");
+    const stages = boot.stages || [], total = stages.reduce((a,s)=>a+s.typ_s, 0) || 1;
+    $("b_stage").textContent = boot.stage_idx ? `${boot.stage_idx}/${boot.n_stages} · ${boot.stage}` : boot.stage;
+    $("b_fill").style.width = (boot.failed ? 100 : (boot.pct||0))+"%";
+    $("b_pct").textContent = boot.failed ? "failed" : (boot.pct||0)+"%";
     $("b_elapsed").textContent = boot.elapsed_s!=null ? "elapsed "+fmtS(boot.elapsed_s) : "";
-    $("b_eta").textContent = boot.eta_s!=null ? "≈ "+fmtS(boot.eta_s)+" remaining" : "";
-    $("b_sub").textContent = boot.stage==="server stopped"
-      ? "No server container found — start it with exl3-kit/start.sh."
-      : "Weights stream from NVMe on both nodes — a cold boot takes ≈ 9 minutes.";
+    $("b_eta").textContent = boot.eta_s!=null ? (boot.late ? "this stage is running long · " : "") + "≈ "+fmtS(boot.eta_s)+" remaining" : "";
+    $("b_sub").textContent = boot.stage_key==="stopped" ? "No server container found — start it with exl3-kit/start.sh."
+      : boot.failed ? (boot.note || "start.sh reported a failed boot — see exl3-kit/logs/")
+      : boot.stage_key==="teardown" ? "start.sh is tearing down the old containers and shipping the kit to the worker."
+      : `stage ${boot.stage_elapsed_s!=null ? fmtS(boot.stage_elapsed_s) : "—"} of a typical ${fmtS(boot.stage_typ_s||0)} · progress is weighted by each stage's usual duration, measured over the last five boots`;
+    // stage boundaries on the track + the stage list
+    const track = $("b_track"); track.querySelectorAll(".seg").forEach(e=>e.remove());
+    let acc = 0; stages.slice(0,-1).forEach(s=>{ acc += s.typ_s; const seg = document.createElement("div"); seg.className="seg"; seg.style.left = (acc/total*100)+"%"; track.appendChild(seg); });
+    const ol = $("b_stages"); ol.replaceChildren();
+    stages.forEach((s,i)=>{ const li = document.createElement("li"); li.className = s.state + (s.state==="current" && boot.late ? " late" : "");
+      const n = document.createElement("span"); n.className="n"; n.textContent = s.state==="done" ? "✓" : s.state==="current" ? "▶" : String(i+1);
+      const lab = document.createElement("span"); lab.textContent = s.label;
+      const dd = document.createElement("span"); dd.className="d"; dd.textContent = s.state==="done" ? fmtS(s.took_s) : s.state==="current" ? `${fmtS(s.elapsed_s)} / ~${fmtS(s.typ_s)}` : `~${fmtS(s.typ_s)}`;
+      li.append(n, lab, dd); ol.appendChild(li); });
   } else bootEl.className = "";
 
   const r = d.row || {};
@@ -432,7 +453,8 @@ function renderRail(){
   put("r_pp", r.pp, v=>Math.round(v)+"");
   put("r_acc", r.accpct, v=>v.toFixed(1)+"%");
   put("r_tau", r.tau, v=>v.toFixed(2)+" tok");
-  put("r_kv", r.kv, v=>v.toFixed(1)+"%");
+  { const tot = d.kv_total_tokens, used = (r.kv!=null && tot) ? r.kv/100*tot : null;   // engine's real capacity, all cache groups
+    $("r_kv").textContent = r.kv==null ? "—" : tot ? `${fmtTok(used)} / ${fmtTok(tot)} · ${r.kv.toFixed(1)}%` : r.kv.toFixed(1)+"%"; }
   $("r_rw").textContent = `${r.run??"—"} / ${r.wait??"—"}`;
   $("rw_row").title = `waiting: ${r.wait_cap??0} capacity · ${r.wait_def??0} deferred`;
   $("r_steps").textContent = r.steps!=null ? `${r.steps.toFixed(1)} · ${r.stepsz!=null?r.stepsz.toFixed(1):"—"}` : "—";
@@ -450,10 +472,10 @@ function renderRail(){
     meter(`m_${k}_mem`, n.mem.used_gib, n.mem.total_gib||121.6, v=>v.toFixed(1)+"G", 120.9, 120.0);
     meter(`m_${k}_tmp`, n.gpu.temp, 95, v=>Math.round(v)+"°", 82, 74);
     const eng = n.procs && n.procs.engined != null ? n.procs.engined : null;   // MiB, worker only (Liam's cap: 4 GB)
-    const engOver = eng != null && eng > 4096;
+    const engOver = eng != null && eng > 6144;
     $(`i_${k}`).textContent =
       `${Math.round(n.gpu.power??0)} W · ${r[k+"_net"]!=null?fmtN(r[k+"_net"]):"—"} MB/s · cpu ${Math.round(n.cpu_pct??0)}%` +
-      (eng != null ? ` · engined ${(eng/1024).toFixed(2)} GB${engOver ? " ⚠ OVER 4 GB CAP" : ""}` : "");
+      (eng != null ? ` · engined ${(eng/1024).toFixed(2)} GB${engOver ? " ⚠ OVER 6 GB CAP" : ""}` : "");
     $(`i_${k}`).classList.toggle("alert", engOver);
   }
 }
@@ -741,7 +763,7 @@ function drawKV(){
   if (lines.length){ ctx.font = "600 11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; const lw = Math.max(...lines.map(l=>ctx.measureText(l[1]).width)) + 26, lh = 15;
     ctx.fillStyle = "rgba(11,13,16,0.82)"; ctx.fillRect(6, 6, lw, lines.length*lh + 8);
     lines.forEach(([col, txt], i)=>{ ctx.fillStyle = col; ctx.fillRect(12, 12 + i*lh, 8, 8); ctx.fillStyle = "#dfe6ee"; ctx.fillText(txt, 26, 20 + i*lh); }); }
-  $("kv_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s);
+  $("kv_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); $("kv_title").textContent = kvTitle("kv pool");
   const kvh = $("cv_kv").parentElement.querySelector("h4"); if (kvh) kvh.textContent = `kv pool — ${(pool/1e6).toFixed(2)}M tokens`;
 }
 function gauge(ctx,x,y,r,v,max,label,unit,color){
@@ -1018,6 +1040,10 @@ function drawTerrain(){
 function poolText(s){ if (s.blocks_total == null) return ""; const inuse = s.blocks_total - (s.blocks_evictable ?? 0);
   return ` · pool ${s.blocks_total} pages: ${inuse} in use · ${s.blocks_cached ?? "?"} cached · ${s.blocks_free ?? "?"} free${s.groups ? ` · ${s.groups} groups` : ""}`; }
 const fmtK = v => v >= 1e6 ? (v/1e6).toFixed(2)+"M" : v >= 1e3 ? Math.round(v/1e3)+"K" : String(v);
+// KV capacity in tokens = the engine's "GPU KV cache size" (all cache groups), relayed by the collector.
+const kvTotal = () => (LIVE && LIVE.kv_total_tokens) || null;
+function kvUsedText(s){ const tot = kvTotal(), pct = (s.usage*100); return tot ? `${fmtTok(s.usage*tot)} of ${fmtTok(tot)} tokens used · ${pct.toFixed(1)}%` : `${pct.toFixed(1)}% used`; }
+function kvTitle(base){ const tot = kvTotal(); return tot ? `${base} — ${fmtTok(tot)} tokens` : base; }
 function reqLabel(r){ return r.computed < r.prompt ? `${r.id} · ${fmtK(r.computed)}/${fmtK(r.prompt)} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}%` : `${r.id} · ${fmtK(r.total)} ctx · generating`; }
 function labelSprite(){ const cv = document.createElement("canvas"); cv.width = 512; cv.height = 64; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(15, 1.9, 1); sp.userData = {cv, tex, text: ""}; return sp; }
@@ -1050,7 +1076,7 @@ function drawKV3(){
         const bar = document.createElement("span"); bar.className = "bar"; const fill = document.createElement("span"); fill.className = "fill"; fill.style.background = pal[k%8];
         fill.style.width = (r.computed < r.prompt ? Math.round(100*r.computed/Math.max(r.prompt,1)) : 100) + "%"; bar.appendChild(fill);
         row.append(sw, tx, bar); lg.appendChild(row); }); lg.hidden = reqs.length === 0; } }
-    $("kv3_sub").textContent = `${(s.usage*100).toFixed(1)}% used · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); o.dirty=false; }
+    $("kv3_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); $("kv3_title").textContent = kvTitle("kv pool — requests × blocks"); o.dirty=false; }
   o.r.render(o.s, o.c);
 }
 let init3done = false;

@@ -113,6 +113,26 @@ def read_disk():
 WATCH_PROCS = ("engined",)
 
 
+def _gpu_mem_by_comm():
+    """GPU memory (MiB) the driver attributes to each watched process name; unified memory, so it competes
+    with vLLM's headroom exactly like RSS does."""
+    out = {}
+    try:
+        import subprocess
+        r = subprocess.run(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=3)
+        for ln in r.stdout.splitlines():
+            parts = [x.strip() for x in ln.split(",")]
+            if len(parts) >= 2 and parts[1].isdigit():
+                name = os.path.basename(parts[0])
+                for w in WATCH_PROCS:
+                    if w in name:
+                        out[w] = out.get(w, 0) + int(parts[1])
+    except Exception:
+        pass
+    return out
+
+
 def read_procs():
     out = {}
     try:
@@ -133,6 +153,8 @@ def read_procs():
                 continue
     except OSError:
         pass
+    for k, v in _gpu_mem_by_comm().items():
+        out[k] = out.get(k, 0) + v
     return out
 
 

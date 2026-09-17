@@ -3,14 +3,17 @@
 # above 8 GB in total, so 4 GB per node). Cron (head, user liam): */5. Logs both, desktop-notifies (60-min
 # cooldown) and writes an alert file the dashboard shows while either node or the total is over its cap.
 WORKER="${WORKER:-169.254.152.37}"
-CAP_NODE_MIB="${ENGINED_CAP_NODE_MIB:-4096}"
-CAP_TOTAL_MIB="${ENGINED_CAP_TOTAL_MIB:-8192}"
+CAP_NODE_MIB="${ENGINED_CAP_NODE_MIB:-6144}"
+CAP_TOTAL_MIB="${ENGINED_CAP_TOTAL_MIB:-12288}"
 DIR=/home/liam/cluster-dashboard
 LOG=$DIR/engined_watch.log
 ALERT=$DIR/engined_alert.json
 STAMP=/tmp/engined_watch.notified
-head_mib=$(ps -o rss= -C engined | awk '{s+=$1} END{printf "%d", s/1024}')
-worker_mib=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$WORKER" "ps -o rss= -C engined | awk '{s+=\$1} END{printf \"%d\", s/1024}'" 2>/dev/null)
+# Footprint = host RSS + GPU memory the driver attributes to the process (engined holds ~1.9 GB of GPU memory on
+# each node, 2026-09-17, invisible to RSS). Both are unified memory here, so both count against vLLM's headroom.
+eng_mib() { local rss gpu; rss=$(ps -o rss= -C engined | awk '{s+=$1} END{printf "%d", s/1024}'); gpu=$(nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader,nounits 2>/dev/null | awk -F', ' '$1 ~ /engined/ {s+=$2} END{printf "%d", s}'); echo $(( ${rss:-0} + ${gpu:-0} )); }
+head_mib=$(eng_mib)
+worker_mib=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$WORKER" "$(declare -f eng_mib); eng_mib" 2>/dev/null)
 now=$(date '+%Y-%m-%d %H:%M:%S')
 [ -z "$worker_mib" ] && worker_mib=-1
 echo "$now,head=$head_mib,worker=$worker_mib" >> "$LOG"

@@ -182,6 +182,77 @@ def record_ribbon(layer_idx: int, hidden: torch.Tensor) -> None:
 
 
 _MAINT_EVERY = float(os.environ.get("GLM53_MEM_MAINT_S", "600"))
+_MEM_SNAPSHOT = os.environ.get("GLM53_MEM_SNAPSHOT", "0") == "1"      # dump a torch allocator snapshot once after boot
+_IT_CLEANUP = os.environ.get("GLM53_IT_CLEANUP", "1") == "1"         # release InstantTensor's global buffers once loading is over
+_it_done = False
+
+
+def _shmem_mib() -> int:
+    try:
+        with open("/proc/meminfo") as f:
+            for l in f:
+                if l.startswith("Shmem:"):
+                    return int(l.split()[1]) // 1024
+    except Exception:
+        pass
+    return -1
+
+
+def _it_cleanup(log) -> None:
+    """InstantTensor keeps its host/device staging buffers in module globals until atexit; after the last load
+    they are dead weight. One call, logged with the node's Shmem before/after so the effect is measurable."""
+    global _it_done
+    if not _IT_CLEANUP or _it_done:
+        return
+    _it_done = True
+    try:
+        import sys as _sys
+        if "instanttensor" not in _sys.modules:
+            log.info("[glm53-mem] instanttensor cleanup: module not loaded, nothing to release")
+            return
+        import instanttensor
+        b = _shmem_mib()
+        instanttensor._C.cleanup()
+        torch.cuda.synchronize()
+        a = _shmem_mib()
+        log.info("[glm53-mem] instanttensor cleanup: Shmem %d -> %d MiB (%+d)", b, a, a - b)
+    except Exception as e:
+        log.warning("[glm53-mem] instanttensor cleanup skipped: %r", e)
+_MEM_SNAPSHOT_DIR = os.environ.get("GLM53_MEM_SNAPSHOT_DIR", "/root/.cache/vllm")
+_snap_done = False
+if _MEM_SNAPSHOT:
+    try:  # record allocation stacks from the first hook call on (profile run), so the snapshot names each big block
+        torch.cuda.memory._record_memory_history(max_entries=200000)
+    except Exception:
+        pass
+
+
+def _mem_snapshot(tag: str) -> None:
+    """Write the caching-allocator snapshot (segments, blocks, stacks) and memory_stats as JSON for offline attribution."""
+    global _snap_done
+    if not _MEM_SNAPSHOT or _snap_done:
+        return
+    _snap_done = True
+    try:
+        rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))
+        snap = torch.cuda.memory_snapshot()
+        stats = {k: v for k, v in torch.cuda.memory_stats().items() if k.endswith(".all.current") or k.endswith(".all.peak") or k.startswith("num_")}
+        segs = []
+        for s in snap:
+            blocks = s.get("blocks", [])
+            big = sorted(({"size": b.get("size", 0), "state": b.get("state"),
+                           "frames": [f"{f.get('filename','?')}:{f.get('line','?')} {f.get('name','?')}" for f in (b.get("frames") or [])[:12]]}
+                          for b in blocks if b.get("size", 0) >= 64 << 20), key=lambda b: -b["size"])[:8]
+            segs.append({"address": s.get("address"), "total_size": s.get("total_size"), "allocated_size": s.get("allocated_size"),
+                         "active_size": s.get("active_size"), "segment_type": s.get("segment_type"), "stream": str(s.get("stream")), "big_blocks": big})
+        segs.sort(key=lambda x: -(x["total_size"] or 0))
+        out = os.path.join(_MEM_SNAPSHOT_DIR, f"mem_snapshot_rank{rank}_{tag}.json")
+        with open(out, "w") as f:
+            json.dump({"tag": tag, "ts": time.time(), "stats": stats, "segments": segs[:400]}, f)
+        log.info("[glm53-mem] snapshot written: %s (%d segments)", out, len(snap))
+        torch.cuda.memory._record_memory_history(enabled=None)
+    except Exception as e:
+        log.warning("[glm53-mem] snapshot failed: %r", e)
 _MAINT_EMPTY = os.environ.get("GLM53_MEM_MAINT_EMPTY_CACHE", "1") == "1"
 _maint_last = [time.time()]
 
@@ -237,6 +308,9 @@ def _mem_maint() -> None:
             for l in f:
                 if l.startswith("MemAvailable"):
                     avail = int(l.split()[1]) // 1024; break
+        if not torch.cuda.is_current_stream_capturing():
+            _it_cleanup(log)
+        _mem_snapshot("steady")
         a0, r0 = torch.cuda.memory_allocated() / 2**20, torch.cuda.memory_reserved() / 2**20
         peak = torch.cuda.max_memory_allocated() / 2**20          # highest torch allocation since the last tick
         released = 0.0

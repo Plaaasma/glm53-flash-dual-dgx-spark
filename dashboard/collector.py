@@ -108,68 +108,166 @@ def pctile(now_b, old_b, q):
 
 
 # ---------------- boot progress (EXL3 kit) ----------------
-BOOT_LOG = "/home/liam/glm53/exl3-kit/logs/head.log"
-# (stage-regex, label, pct at stage START, pct at stage END)
+# Stage-based progress: the phases start.sh reports through logs/boot-state.json (teardown, launch, health,
+# ready, failed) plus milestones parsed from the head container's own log with real timestamps. Percent is
+# weighted by each stage's typical duration (measured on boot 34, 2026-09-17: 159 s end to end) and the ETA is the
+# typical time of the stages still ahead, so it reflects where the boot actually is, not wall-clock guessing.
 import re as _re
 import subprocess as _sp
+import json as _json
+import datetime as _dt
+BOOT_STATE = "/home/liam/glm53/exl3-kit/logs/boot-state.json"
+# (key, label, typical seconds, marker regex in the head log that ENDS the stage; None = ended by state file)
 _BOOT_STAGES = [
-    (_re.compile(r"Loading safetensors checkpoint shards:\s+(\d+)% .*?(\d+)/(\d+)"),
-     "loading weights", 5.0, 62.0),
-    (_re.compile(r"Building EXL3|exl3.*build|pointer tables"), "building EXL3 experts", 62.0, 68.0),
-    (_re.compile(r"Profiling CUDA graph"), "profiling CUDA graphs", 68.0, 76.0),
-    (_re.compile(r"Capturing CUDA graphs|Capturing dflash2"), "capturing CUDA graphs", 76.0, 86.0),
-    (_re.compile(r"init engine .* took"), "engine warmup", 86.0, 93.0),
-    (_re.compile(r"Multi-modal warmup|chat template|Supported tasks"), "starting API server", 93.0, 99.0),
+    ("teardown", "stopping old containers, shipping files", 20, None),
+    ("patch",    "applying kit patches (both containers)",    8, _re.compile(r"launching: vllm serve")),
+    ("init",     "engine init + worker join over CX7",       16, _re.compile(r"Initializing a V1 LLM engine")),
+    ("weights",  "streaming weights (InstantTensor)",         52, _re.compile(r"Loading weights took")),
+    ("reclaim",  "post-load reclaim + draft weights",          4, _re.compile(r"Loading weights took.*\n(?:.*\n)*?.*Loading weights took")),
+    ("kv",       "MoE kernels + KV cache allocation",         28, _re.compile(r"GPU KV cache size")),
+    ("graphs",   "CUDA graph capture",                        14, _re.compile(r"Graph capturing finished")),
+    ("api",      "API server startup",                        10, _re.compile(r"Application startup complete")),
+    ("health",   "health check + post-ready reclaim",          7, None),
 ]
-_TOTAL_BOOT_EST = 540.0   # seconds, typical full boot on this cluster
+_TOTAL_TYP = float(sum(s[2] for s in _BOOT_STAGES))
+_boot_cache = {"t": 0.0, "log": "", "started": None}
 
 def _container_state():
     try:
-        out = _sp.run(["docker", "inspect", "-f", "{{.State.Status}} {{.State.StartedAt}}",
+        out = _sp.run(["docker", "inspect", "-f", "{{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
                        "glm53-exl3-head"], capture_output=True, text=True, timeout=3)
         if out.returncode != 0:
-            return None, None
-        st, started = out.stdout.split()
-        import datetime
-        ts = datetime.datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp()
-        return st, ts
+            return None, None, None
+        st, started, finished = out.stdout.split()
+        p = lambda s: _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if not s.startswith("0001") else None
+        return st, p(started), p(finished)
     except Exception:
-        return None, None
+        return None, None, None
+
+def _head_log(started):
+    """Head container log since it started, with docker's RFC3339 timestamps (cached 2 s)."""
+    now = time.time()
+    if now - _boot_cache["t"] < 2.0 and _boot_cache["started"] == started:
+        return _boot_cache["log"]
+    try:
+        out = _sp.run(["docker", "logs", "--timestamps", "glm53-exl3-head"], capture_output=True, text=True, timeout=5)
+        log = (out.stdout or "") + (out.stderr or "")
+    except Exception:
+        log = ""
+    _boot_cache.update(t=now, log=log, started=started)
+    return log
+
+def _line_ts(line):
+    m = _re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+)Z", line)
+    if not m:
+        return None
+    s = m.group(1)
+    return _dt.datetime.fromisoformat(s[:26] + "+00:00").timestamp()
+
+def _read_state():
+    try:
+        with open(BOOT_STATE) as f:
+            return _json.load(f)
+    except Exception:
+        return None
 
 def boot_progress():
-    """Returns None when serving/idle, else {stage, pct, eta_s, elapsed_s}."""
-    st, started = _container_state()
-    if st is None:
-        return {"stage": "server stopped", "pct": 0.0, "eta_s": None, "elapsed_s": None}
-    if st != "running":
-        return {"stage": f"container {st}", "pct": 0.0, "eta_s": None, "elapsed_s": None}
-    elapsed = max(0.0, time.time() - (started or time.time()))
-    stage, pct = "container starting", 2.0
-    try:
-        with open(BOOT_LOG, "rb") as f:
-            f.seek(max(0, f.seek(0, 2) - 262144))
-            tail = f.read().decode(errors="replace")
-        if os.path.getmtime(BOOT_LOG) < (started or 0):
-            tail = ""             # stale log from a previous boot
-        for line in tail.splitlines():
-            for rx, label, p0, p1 in _BOOT_STAGES:
-                m = rx.search(line)
+    """None when serving; else {stage, stage_key, stage_idx, n_stages, pct, eta_s, elapsed_s, stages:[...], failed}."""
+    st, started, finished = _container_state()
+    state = _read_state() or {}
+    phase, ptime = state.get("phase"), float(state.get("t") or 0)
+    now = time.time()
+    # A start.sh run in progress (teardown/launch phases) may predate the new container.
+    shell_boot = phase in ("teardown", "launching", "containers", "healthy") and now - ptime < 1800
+    if not shell_boot and (st is None or st != "running"):
+        if phase == "failed" and now - ptime < 6 * 3600:
+            return {"stage": "boot failed", "stage_key": "failed", "failed": True, "pct": 0.0, "eta_s": None,
+                    "elapsed_s": None, "note": state.get("note"), "stages": []}
+        return {"stage": "server stopped", "stage_key": "stopped", "pct": 0.0, "eta_s": None, "elapsed_s": None, "stages": []}
+    # Stage timeline: t0 = the shell's launch (state file) or the container start
+    t0 = ptime if phase in ("teardown", "launching") and (started is None or ptime <= started) else (started or ptime or now)
+    if phase in ("teardown", "launching") and started and started < ptime:
+        started = None                     # the running container belongs to the previous boot
+    ends = {}                              # stage key -> end timestamp
+    if started:
+        ends["teardown"] = started
+        log = _head_log(started)
+        lines = log.splitlines()
+        first_weights = None
+        for ln in lines:
+            ts = _line_ts(ln)
+            if ts is None:
+                continue
+            if "launching: vllm serve" in ln and "patch" not in ends:
+                ends["patch"] = ts
+            elif "Initializing a V1 LLM engine" in ln and "init" not in ends:
+                ends["init"] = ts
+            elif "Loading weights took" in ln:
+                if first_weights is None:
+                    first_weights = ts; ends["weights"] = ts
+                elif "reclaim" not in ends:
+                    ends["reclaim"] = ts
+            elif "GPU KV cache size" in ln and "kv" not in ends:
+                ends["kv"] = ts
+            elif "Graph capturing finished" in ln and "graphs" not in ends:
+                ends["graphs"] = ts
+            elif "Application startup complete" in ln and "api" not in ends:
+                ends["api"] = ts
+    if phase in ("healthy", "ready") and ptime >= (started or 0):
+        ends["api"] = min(ends.get("api", ptime), ptime)
+        if phase == "ready":
+            ends["health"] = ptime
+    # Walk the stages in order; the first one without an end is the current stage.
+    stages, done_typ, cur = [], 0.0, None
+    prev_end = t0
+    for key, label, typ, _rx in _BOOT_STAGES:
+        end = ends.get(key)
+        if end is not None and cur is None:
+            stages.append({"key": key, "label": label, "typ_s": typ, "state": "done", "took_s": round(max(0.0, end - prev_end))})
+            done_typ += typ; prev_end = end
+        elif cur is None:
+            cur = (key, label, typ, prev_end)
+            stages.append({"key": key, "label": label, "typ_s": typ, "state": "current", "elapsed_s": round(max(0.0, now - prev_end))})
+        else:
+            stages.append({"key": key, "label": label, "typ_s": typ, "state": "pending"})
+    if cur is None:                        # every stage ended: ready
+        return None
+    key, label, typ, cstart = cur
+    in_stage = max(0.0, now - cstart)
+    pct = (done_typ + min(in_stage, typ)) / _TOTAL_TYP * 100.0
+    remaining = sum(s["typ_s"] for s in stages if s["state"] == "pending") + max(0.0, typ - in_stage)
+    idx = next(i for i, s in enumerate(stages) if s["state"] == "current")
+    late = in_stage > 1.5 * typ
+    return {"stage": label, "stage_key": key, "stage_idx": idx + 1, "n_stages": len(stages),
+            "pct": round(min(pct, 99.0), 1), "eta_s": round(remaining), "elapsed_s": round(now - t0),
+            "stage_elapsed_s": round(in_stage), "stage_typ_s": typ, "late": late, "stages": stages,
+            "failed": False}
+
+# ---------------- KV pool capacity (tokens) ----------------
+# The engine prints its real capacity once per boot ("GPU KV cache size: N tokens"): the number that already
+# accounts for every cache group sharing the block pool. Parsed from the head container log, cached per
+# container start; the scheduler snapshot's pool_tokens is attention-page tokens and overstates it ~2.4x.
+_kv_total_cache = {"started": None, "tokens": None, "t": 0.0}
+
+def kv_total_tokens():
+    st, started, _fin = _container_state()
+    now = time.time()
+    c = _kv_total_cache
+    if c["started"] == started and (c["tokens"] is not None or now - c["t"] < 10.0):
+        return c["tokens"]
+    c["started"], c["t"] = started, now
+    tokens = None
+    if st == "running":
+        try:
+            out = _sp.run(["docker", "logs", "glm53-exl3-head"], capture_output=True, text=True, timeout=5)
+            for ln in reversed((out.stdout + out.stderr).splitlines()):
+                m = _re.search(r"GPU KV cache size:\s*([\d,]+)\s*tokens", ln)
                 if m:
-                    stage, pct = label, p1
-                    if label == "loading weights" and m.lastindex and m.lastindex >= 3:
-                        frac = int(m.group(2)) / max(1, int(m.group(3)))
-                        pct = p0 + frac * (p1 - p0)
-                        stage = f"loading weights ({m.group(2)}/{m.group(3)} shards)"
-    except Exception:
-        pass
-    # ETA: blend the fixed budget with observed pace once we have signal.
-    if pct > 4 and elapsed > 20:
-        total = max(_TOTAL_BOOT_EST, elapsed / (pct / 100.0) * 0.9)
-    else:
-        total = _TOTAL_BOOT_EST
-    eta = max(0.0, total - elapsed)
-    return {"stage": stage, "pct": round(min(pct, 99.0), 1),
-            "eta_s": round(eta), "elapsed_s": round(elapsed)}
+                    tokens = int(m.group(1).replace(",", "")); break
+        except Exception:
+            tokens = None
+    c["tokens"] = tokens
+    return tokens
 
 # ---------------- collector loop ----------------
 # prev_vllm/ring_vllm and prev_sglang/ring_sglang are kept SEPARATE (not shared)
@@ -402,7 +500,7 @@ def tick():
             row[f"{key}_gpu"] = d["gpu"]["util"]; row[f"{key}_temp"] = d["gpu"]["temp"]
             row[f"{key}_power"] = d["gpu"]["power"]; row[f"{key}_mem"] = d["mem"]["used_gib"]
             row[f"{key}_cpu"] = d["cpu_pct"]; row[f"{key}_net"] = net_rate(key, d)
-    state["live"] = {"ts": now, "engine_up": engine_up, "model": state["model"],
+    state["live"] = {"ts": now, "engine_up": engine_up, "model": state["model"], "kv_total_tokens": kv_total_tokens(),
                      "engine": state["engine"], "row": row, "nodes": nodes,
                      "boot": None if engine_up else boot_progress()}
     return now, row

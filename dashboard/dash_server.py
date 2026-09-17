@@ -58,7 +58,9 @@ def derive(live, viz):
         "running": run, "decoding": dec, "prefilling": max(0, (run or 0) - (dec or 0)) if r.get("dec") is not None else None,
         "waiting": r.get("wait"),
         "spec_accept_pct": r.get("accpct"), "accept_length": r.get("tau"), "drafted_tok_s": r.get("draftrate"),
-        "kv_usage_pct": r.get("kv"), "prefix_hit_pct": r.get("pfx"), "prompt_cached_pct": r.get("cachedpct"),
+        "kv_usage_pct": r.get("kv"), "kv_total_tokens": live.get("kv_total_tokens"),
+        "kv_used_tokens": (r.get("kv") / 100.0 * live["kv_total_tokens"]) if (r.get("kv") is not None and live.get("kv_total_tokens")) else None,
+        "prefix_hit_pct": r.get("pfx"), "prompt_cached_pct": r.get("cachedpct"),
         "steps_per_s": r.get("steps"), "tokens_per_step": r.get("stepsz"), "est_tflops": r.get("tflops"),
         "ttft_s": {"p50": r.get("ttft50"), "p99": r.get("ttft99")},
         "itl_s": {"p50": r.get("itl50"), "p99": r.get("itl99")},
@@ -87,7 +89,7 @@ def derive(live, viz):
             "gpu_sm_mhz": g.get("sm_mhz"), "mem_used_gib": m.get("used_gib"), "mem_total_gib": m.get("total_gib"),
             "cpu_pct": n.get("cpu_pct"), "net_mb_s": r.get(f"{k}_net"), "load1": n.get("load1"),
             "engined_mib": (n.get("procs") or {}).get("engined"),
-            "engined_over_cap": ((n.get("procs") or {}).get("engined") or 0) > 4096,
+            "engined_over_cap": ((n.get("procs") or {}).get("engined") or 0) > 6144,
         }
     return out
 
@@ -125,7 +127,7 @@ def engined_view():
             out["last_sample"] = lines[-1]
     except Exception:  # noqa: BLE001
         pass
-    out["caps_mib"] = {"per_node": 4096, "total": 8192}
+    out["caps_mib"] = {"per_node": 6144, "total": 12288}
     return out
 
 

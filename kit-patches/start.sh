@@ -192,6 +192,8 @@ MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 MMCHUNK_PATCH_HOST="${MMCHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_chunk.py}"
 APCPROBE_PATCH_HOST="${APCPROBE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_probe.py}"
 APCREFRESH_PATCH_HOST="${APCREFRESH_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_refresh.py}"
+MTPSHARDS_PATCH_HOST="${MTPSHARDS_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mtp_shards.py}"
+IDXBUF_PATCH_HOST="${IDXBUF_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_indexer_buffer.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
@@ -249,6 +251,8 @@ GLM53_POSTLOAD_RECLAIM="${GLM53_POSTLOAD_RECLAIM:-0}"
 GLM53_POSTREADY_RECLAIM="${GLM53_POSTREADY_RECLAIM:-0}"
 # Boot-time headroom guard (host side): reclaim 2 GiB on a node whose MemAvailable drops under this many MiB
 GLM53_BOOT_GUARD_MIB="${GLM53_BOOT_GUARD_MIB:-2500}"
+GLM53_BOOT_GUARD_GIB="${GLM53_BOOT_GUARD_GIB:-3}"
+GLM53_PREAPI_RECLAIM="${GLM53_PREAPI_RECLAIM:-3}"
 # In-engine memory maintenance period (s) and whether it calls torch.cuda.empty_cache()
 GLM53_MEM_MAINT_S="${GLM53_MEM_MAINT_S:-600}"
 GLM53_MEM_MAINT_EMPTY_CACHE="${GLM53_MEM_MAINT_EMPTY_CACHE:-1}"
@@ -322,6 +326,9 @@ EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
 
 # ------------------------------- helpers -----------------------------------
 log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
+# Boot phase for the dashboard (collector.py reads $LOGDIR/boot-state.json): phase name, epoch, boot id.
+BOOT_ID="${BOOT_ID:-$(date +%s)}"
+boot_phase() { mkdir -p "$LOGDIR" 2>/dev/null; printf '{"phase":"%s","t":%s,"boot_id":"%s","note":"%s"}\n' "$1" "$(date +%s.%N)" "$BOOT_ID" "${2:-}" > "$LOGDIR/boot-state.json.tmp" 2>/dev/null && mv -f "$LOGDIR/boot-state.json.tmp" "$LOGDIR/boot-state.json" 2>/dev/null || true; }
 warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -368,7 +375,10 @@ banner() {
     printf '\n'
 }
 
-worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
+# One multiplexed ssh connection for every worker hop of a boot (30 scp + ~40 worker_ssh calls incl. the boot
+# guard loop): avoids a TCP + key exchange per call and the sshd MaxStartups lottery. Socket dies 2 min idle.
+SSH_MUX="-o ControlMaster=auto -o ControlPath=/tmp/glm53-mux-%C -o ControlPersist=120"
+worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 $SSH_MUX "$WORKER_SSH" "$@"; }
 
 postload_reclaim_watch() {
     # Runs in the background from start(): as soon as the first weight pass has
@@ -385,11 +395,26 @@ postload_reclaim_watch() {
             ( sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$n" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed" ) &
             ( worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$n'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed" ) &
             wait
-            return 0
+            break
         fi
         sleep 2
     done
-    warn "post-load reclaim: never saw 'Loading weights took' — skipped"
+    # Pre-API reclaim (2026-09-15): the boot's memory PEAK is the API server's startup right after graph
+    # capture (imports, tokenizer, image processor), ~3 GiB above steady state. Boots 30/31 died there with
+    # engined at 6 GB on the head even after the KV pin was halved. Push cold pages out first.
+    local m="${GLM53_PREAPI_RECLAIM:-3}"
+    [ "$m" != "0" ] || return 0
+    for i in $(seq 1 600); do
+        if docker logs "$CONTAINER_HEAD" 2>&1 | grep -aq "Graph capturing finished"; then
+            log "pre-API reclaim: pushing ${m} GiB of cold pages to zram on both nodes (parallel) ..."
+            ( sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$m" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed" ) &
+            ( worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$m'" 2>&1 | sed 's/^/    worker: /' || warn "worker reclaim failed" ) &
+            wait
+            return 0
+        fi
+        if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null | grep -q true; then return 0; fi
+        sleep 1
+    done
 }
 
 boot_headroom_guard() {
@@ -397,20 +422,20 @@ boot_headroom_guard() {
     # node's MemAvailable drops under GLM53_BOOT_GUARD_MIB (default 2500) during
     # load / KV allocation / graph capture, reclaim 2 GiB there (at most every
     # 20 s per node). The watchdog kills at 750 MiB; this keeps boots away from it.
-    local thr="${GLM53_BOOT_GUARD_MIB:-2500}" last_h=0 last_w=0 now h w
+    local thr="${GLM53_BOOT_GUARD_MIB:-2500}" gib="${GLM53_BOOT_GUARD_GIB:-3}" last_h=0 last_w=0 now h w
     [ "$thr" != "0" ] || return 0
     while true; do
         now=$(date +%s)
         h=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
         w=$(worker_ssh "awk '/MemAvailable/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 999999)
-        if [ "${h:-999999}" -lt "$thr" ] && [ $((now - last_h)) -gt 20 ]; then
-            log "boot guard: head MemAvailable ${h} MiB < ${thr} — reclaiming 2 GiB"
-            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" 2 2>&1 | sed 's/^/    head:   /' || true
+        if [ "${h:-999999}" -lt "$thr" ] && [ $((now - last_h)) -gt 6 ]; then
+            log "boot guard: head MemAvailable ${h} MiB < ${thr} — reclaiming ${gib} GiB"
+            sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$gib" 2>&1 | sed 's/^/    head:   /' || true
             last_h=$now
         fi
-        if [ "${w:-999999}" -lt "$thr" ] && [ $((now - last_w)) -gt 20 ]; then
-            log "boot guard: worker MemAvailable ${w} MiB < ${thr} — reclaiming 2 GiB"
-            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' 2" 2>&1 | sed 's/^/    worker: /' || true
+        if [ "${w:-999999}" -lt "$thr" ] && [ $((now - last_w)) -gt 6 ]; then
+            log "boot guard: worker MemAvailable ${w} MiB < ${thr} — reclaiming ${gib} GiB"
+            worker_ssh "sudo -n /usr/local/sbin/glm53-reclaim '$CONTAINER_WORKER' '$gib'" 2>&1 | sed 's/^/    worker: /' || true
             last_w=$now
         fi
         sleep 2
@@ -1043,6 +1068,12 @@ fi
 if [ -f /opt/glm53/patch_apc_refresh.py ]; then
     python3 /opt/glm53/patch_apc_refresh.py
 fi
+if [ -f /opt/glm53/patch_mtp_shards.py ]; then
+    python3 /opt/glm53/patch_mtp_shards.py
+fi
+if [ -f /opt/glm53/patch_indexer_buffer.py ]; then
+    python3 /opt/glm53/patch_indexer_buffer.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1183,6 +1214,12 @@ fi
 if [ -f /opt/glm53/patch_apc_refresh.py ]; then
     python3 /opt/glm53/patch_apc_refresh.py
 fi
+if [ -f /opt/glm53/patch_mtp_shards.py ]; then
+    python3 /opt/glm53/patch_mtp_shards.py
+fi
+if [ -f /opt/glm53/patch_indexer_buffer.py ]; then
+    python3 /opt/glm53/patch_indexer_buffer.py
+fi
 if [ -f /opt/glm53/patch_instanttensor_local.py ]; then
     python3 /opt/glm53/patch_instanttensor_local.py
 fi
@@ -1219,7 +1256,7 @@ cleanup_orphan_shm() {
     [ -f "$SHM_CLEANUP_HOST" ] || return 0
     local run="docker run --rm --pid=host --ipc=host --cap-add SYS_PTRACE -v /dev/shm:/dev/shm"
     if [ "$where" = worker ]; then
-        scp -q -o BatchMode=yes "$SHM_CLEANUP_HOST" "${WORKER_SSH}:/tmp/glm53_shm_cleanup.py" 2>/dev/null || return 0
+        scp -q $SSH_MUX -o BatchMode=yes "$SHM_CLEANUP_HOST" "${WORKER_SSH}:/tmp/glm53_shm_cleanup.py" 2>/dev/null || return 0
         out=$(worker_ssh "$run -v /tmp/glm53_shm_cleanup.py:/opt/shm_cleanup.py:ro --entrypoint python3 '$IMAGE' /opt/shm_cleanup.py" 2>/dev/null | grep '^removed' || true)
     else
         out=$($run -v "$SHM_CLEANUP_HOST:/opt/shm_cleanup.py:ro" --entrypoint python3 "$IMAGE" /opt/shm_cleanup.py 2>/dev/null | grep '^removed' || true)
@@ -1232,49 +1269,52 @@ cleanup_orphan_shm() {
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
-    cleanup_orphan_shm head
-    cleanup_orphan_shm worker
+    cleanup_orphan_shm head &
+    cleanup_orphan_shm worker &
+    wait
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
     worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
-    scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
+    scp -q $SSH_MUX -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
-    scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
+    scp -q $SSH_MUX -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
     [ -f "$VIDEO_PATCH_HOST" ] || die "missing $VIDEO_PATCH_HOST"
-    scp -q -o BatchMode=yes "$VIDEO_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm_video_placeholders.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$VIDEO_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm_video_placeholders.py"
     [ -f "$STOP_PATCH_HOST" ] || die "missing $STOP_PATCH_HOST"
-    scp -q -o BatchMode=yes "$STOP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_suppress_stops_in_reasoning.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$STOP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_suppress_stops_in_reasoning.py"
     [ -f "$SCHED_PATCH_HOST" ] || die "missing $SCHED_PATCH_HOST"
-    scp -q -o BatchMode=yes "$SCHED_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_scheduler_decode_floor.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$SCHED_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_scheduler_decode_floor.py"
     [ -f "$DRAFTER_PATCH_HOST" ] || die "missing $DRAFTER_PATCH_HOST"
-    scp -q -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm5_drafter_group.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm5_drafter_group.py"
     [ -f "$APC_PATCH_HOST" ] || die "missing $APC_PATCH_HOST"
-    scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
-    scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
-    scp -q -o BatchMode=yes "$NVFP4_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_nvfp4_kv.py"
-    scp -q -o BatchMode=yes "$DYNSD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dynamic_sd_cg.py"
-    scp -q -o BatchMode=yes "$KPOOLFG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_finegrained.py"
-    scp -q -o BatchMode=yes "$QUIETLOG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_quiet_iteration_log.py"
-    scp -q -o BatchMode=yes "$VIZ_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_viz_hooks.py"
-    scp -q -o BatchMode=yes "$VIZ_RT_HOST" "${WORKER_SSH}:/tmp/glm53_viz_runtime.py"
-    scp -q -o BatchMode=yes "$LIVECTR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_live_step_counters.py"
-    scp -q -o BatchMode=yes "$ITLOCAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_instanttensor_local.py"
-    scp -q -o BatchMode=yes "$LOADREL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_load_release.py"
-    scp -q -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
-    scp -q -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
-    scp -q -o BatchMode=yes "$MMCHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_chunk.py"
-    scp -q -o BatchMode=yes "$APCPROBE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_probe.py"
-    scp -q -o BatchMode=yes "$APCREFRESH_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_refresh.py"
-    [ -f "$EXL3MT_SO_HOST" ] && scp -q -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
-    scp -q -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$NVFP4_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_nvfp4_kv.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$DYNSD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dynamic_sd_cg.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$KPOOLFG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_finegrained.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$QUIETLOG_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_quiet_iteration_log.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$VIZ_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_viz_hooks.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$VIZ_RT_HOST" "${WORKER_SSH}:/tmp/glm53_viz_runtime.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$LIVECTR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_live_step_counters.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$ITLOCAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_instanttensor_local.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$LOADREL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_load_release.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$MMCHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_chunk.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$APCPROBE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_probe.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$APCREFRESH_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_refresh.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$MTPSHARDS_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mtp_shards.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$IDXBUF_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_indexer_buffer.py"
+    [ -f "$EXL3MT_SO_HOST" ] && scp -q $SSH_MUX -o BatchMode=yes "$EXL3MT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_mt.so"
+    scp -q $SSH_MUX -o BatchMode=yes "$NVFP4_RT_HOST" "${WORKER_SSH}:/tmp/glm53_nvfp4_runtime.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
-    scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
 
     worker_ssh "rm -rf /tmp/glm53-ablit"
-    scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
-    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${WORKER_SSH}:/tmp/glm53-ablit_runtime.py"
-    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${WORKER_SSH}:/tmp/patch_ablit.py"
+    scp -q -r $SSH_MUX -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
+    scp -q $SSH_MUX -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${WORKER_SSH}:/tmp/glm53-ablit_runtime.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${WORKER_SSH}:/tmp/patch_ablit.py"
 
     local -a nccl_common=(
         -e NCCL_IB_DISABLE=0
@@ -1295,6 +1335,9 @@ launch_cluster() {
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
         -e "GLM53_MIXED_PREFILL_LADDER=${GLM53_MIXED_PREFILL_LADDER:-1:1024,2:512,4:256,*:128}"
         -e "GLM53_PREFILL_CHUNK_CTX_BUDGET=$GLM53_PREFILL_CHUNK_CTX_BUDGET"
+        -e "GLM53_INDEXER_PREFILL_MULT=${GLM53_INDEXER_PREFILL_MULT:-}"
+        -e "GLM53_MEM_SNAPSHOT=${GLM53_MEM_SNAPSHOT:-0}"
+        -e "GLM53_IT_CLEANUP=${GLM53_IT_CLEANUP:-1}"
         -e "GLM53_NVFP4_KV=$GLM53_NVFP4_KV"
         -e "GLM53_NVFP4_SYNCFREE_T=$GLM53_NVFP4_SYNCFREE_T"
         -e "GLM53_VIZ=$GLM53_VIZ"
@@ -1363,6 +1406,7 @@ launch_cluster() {
              GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
              GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
              GLM53_MM_CAP GLM53_MM_CAP_BATCH GLM53_MM_CHUNK GLM53_MM_COLD_MAX \
+             GLM53_INDEXER_PREFILL_MULT GLM53_MEM_SNAPSHOT GLM53_IT_CLEANUP \
              GLM53_IT_LOCAL_READS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
@@ -1408,6 +1452,8 @@ launch_cluster() {
         -v '/tmp/patch_mm_chunk.py:/opt/glm53/patch_mm_chunk.py:ro' \
         -v '/tmp/patch_apc_probe.py:/opt/glm53/patch_apc_probe.py:ro' \
         -v '/tmp/patch_apc_refresh.py:/opt/glm53/patch_apc_refresh.py:ro' \
+        -v '/tmp/patch_mtp_shards.py:/opt/glm53/patch_mtp_shards.py:ro' \
+        -v '/tmp/patch_indexer_buffer.py:/opt/glm53/patch_indexer_buffer.py:ro' \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_mt.so:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v '/tmp/glm53_nvfp4_runtime.py:/opt/glm53/glm53_nvfp4_runtime.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
@@ -1455,6 +1501,8 @@ launch_cluster() {
         -v "$MMCHUNK_PATCH_HOST:/opt/glm53/patch_mm_chunk.py:ro" \
         -v "$APCPROBE_PATCH_HOST:/opt/glm53/patch_apc_probe.py:ro" \
         -v "$APCREFRESH_PATCH_HOST:/opt/glm53/patch_apc_refresh.py:ro" \
+        -v "$MTPSHARDS_PATCH_HOST:/opt/glm53/patch_mtp_shards.py:ro" \
+        -v "$IDXBUF_PATCH_HOST:/opt/glm53/patch_indexer_buffer.py:ro" \
         $( [ -f "$EXL3MT_SO_HOST" ] && echo "-v $EXL3MT_SO_HOST:/opt/glm53/glm53_exl3_mt.so:ro" ) \
         -v "$LOADDIAG_PATCH_HOST:/opt/glm53/patch_load_diag.py:ro" \
         -v "$NVFP4_RT_HOST:/opt/glm53/glm53_nvfp4_runtime.py:ro" \
@@ -1635,12 +1683,15 @@ start() {
     log "model load path (in-container): ${MODEL_DIR}"
     log "config: image=${IMAGE} tp=${TP} nnodes=${NNODES} quant=${QUANTIZATION} spec=${SPEC_METHOD} mtp=${MTP_TOKENS} dflash_k=${DFLASH_TOKENS} max-len=${MAX_MODEL_LEN} gpu-util=${GPU_MEM_UTIL} kv=${KV_CACHE_DTYPE} lm-only=${LANGUAGE_MODEL_ONLY} port=${PORT}"
 
+    boot_phase launching "shipping files and starting both containers"
     launch_cluster
+    boot_phase containers "containers started; patching and engine init"
     postload_reclaim_watch &
     boot_headroom_guard &
     local guard_pid=$!
     if wait_for_health; then
         kill "$guard_pid" 2>/dev/null || true
+        boot_phase healthy "API healthy; post-ready reclaim"
         if [ "${GLM53_POSTREADY_RECLAIM:-0}" != "0" ]; then
             log "post-ready reclaim: pushing ${GLM53_POSTREADY_RECLAIM} GiB of cold pages to zram on both nodes ..."
             sudo -n /usr/local/sbin/glm53-reclaim "$CONTAINER_HEAD" "$GLM53_POSTREADY_RECLAIM" 2>&1 | sed 's/^/    head:   /' || warn "head reclaim failed"
@@ -1648,9 +1699,11 @@ start() {
         fi
         post_ready_warmup
         on_ready
+        boot_phase ready "serving"
         return
     fi
     kill "$guard_pid" 2>/dev/null || true
+    boot_phase failed "server did not become healthy"
     collect_failure_logs
     echo "---- last 60 lines of head log ($LOGDIR/head.log) ----"
     tail -n 60 "$LOGDIR/head.log" || true
@@ -1661,6 +1714,7 @@ start() {
 
 # ------------------------------- stop --------------------------------------
 stop() {
+    boot_phase teardown "stopping containers"
     log "stopping head container ..."
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
     log "stopping worker container on ${WORKER_SSH} ..."

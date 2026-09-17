@@ -1,10 +1,11 @@
-# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 1.95M-token KV pool, NVFP4 KV cache, 16-way serving
+# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 1.65M-token KV pool next to a 12 GB co-tenant, 159 s boots
 
 A complete, battle-tested recipe for serving **GLM-5.3-Flash** (320B/18B MoE,
 vision included) across **two DGX Sparks (GB10, sm_121)** with:
 
-- **1,945,384-token KV pool** at an 8.6 GB per-node pin (2.16× the 900K max
-  context; two ~460K-token agent sessions stay prefix-cached side by side)
+- **1,647,692-token KV pool** at a 7.3 GB per-node pin, sized so that a 6 GB
+  per-node co-tenant process still leaves 3 GB of headroom (section 1.10 has
+  the measured budget); two ~460K-token agent sessions stay prefix-cached
 - **NVFP4 KV cache** — 288 B/token vs the stock 656 B `fp8_ds_mla` (2.28×
   denser), via a gather-dequant Triton path feeding the stock prebuilt kernel
 - **16 concurrency slots**, 900K max context per request, MTP speculative
@@ -29,21 +30,21 @@ exact configuration that survives on real hardware.
 Measured speeds: section 8 (production logs, 2026-09-10/11) and
 [`bench/benchy-c1.md`](bench/benchy-c1.md) (llama-benchy, 2026-09-02).
 
-### Configuration at a glance (live on 2026-09-12)
+### Configuration at a glance (live on 2026-09-17)
 
 | item | value |
 |---|---|
 | Image / engine | `glm53-flash-sm121:local-0904-it` (21.8 GB, built 2026-09-04), vLLM fork `v0.1.dev20051+g487ecf187` |
 | Host | DGX OS kernel 6.17.0-1026-nvidia, driver 580.159.03, GB10 121.63 GiB unified per node |
 | Weights | `neko-legends/GLM-5.3-Flash-Uncensored-EXL3` rev `1fac3dbe`, 92 shards, 163.65 GiB, on both nodes |
-| KV pool | `--kv-cache-memory 8600000000` per node → 1,945,384 tokens, ~281 page IDs of 7936 tokens shared by 5 cache groups |
+| KV pool | `--kv-cache-memory 7300000000` per node → 1,647,692 tokens (page IDs of 7936 tokens shared by 5 cache groups) |
 | Limits | `MAX_MODEL_LEN=900000`, `MAX_NUM_SEQS=16`, `MAX_NUM_BATCHED_TOKENS=2048`, `--prefix-match-unit 64` |
 | Speculative decode | `SPEC_METHOD=mtp`, `MTP_TOKENS=3`, dynamic `[[1,2,3],[3,16,2]]` (3 drafts at 1-2 streams, 2 at 3-16) |
-| Prefill | `GLM53_EXL3_MT=1` variant 8 (auto), ladder `1:1024,2:512,4:256,*:128`, `GLM53_PREFILL_CHUNK_CTX_BUDGET=3e8`, `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128` |
+| Prefill | `GLM53_EXL3_MT=1` variant 8 (auto), ladder `1:1024,2:512,4:256,*:128`, `GLM53_PREFILL_CHUNK_CTX_BUDGET=3e8`, `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128`, `GLM53_INDEXER_PREFILL_MULT=4` |
 | Prefix cache | `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=63488` (KDA checkpoint every 8 pages) |
 | Multimodal | 800 images per prompt, `max_image_tokens=1024` (1008 per 1080p), lru processor cache 0.75 GiB (~80 images), chunks of 4, 16 cold images per request |
-| Memory guard | watchdog at 0.75 GiB, boot guard at 2.5 GiB, post-load/ready reclaim 4/3 GiB, cron reclaim 2 GiB every 20 min + every minute under 2.5 GiB, in-engine maintenance every 30 s |
-| Boot | launch → healthy 249-346 s over the last 17 boots (typical ~290 s) |
+| Memory guard | watchdog at 0.75 GiB, boot guard at 4.5 GiB (3 GiB, 6 s throttle), post-load / pre-API / post-ready reclaim 4/3/3 GiB, cron reclaim 2 GiB every 20 min + every minute under 2.5 GiB, in-engine maintenance every 30 s |
+| Boot | launch → healthy **159 s** (boot 34; was 249-346 s before section 1.11) |
 | Ports | API 8888, dashboard + JSON 3000, collector 9102, node agents 9101, viz UDP 9103 |
 
 ---
@@ -279,6 +280,57 @@ tail pages first (a short partial re-prefill) instead of its checkpoints. It als
 group once a minute (`[glm53-apc] evicted cached blocks by group ...`). Staged 2026-09-11; active from the
 next restart.
 
+### 1.10 Where the memory goes (measured 2026-09-17, head node, steady state)
+
+The checkpoint is 163.6 GiB; split over TP=2 with the replicated parts (embeddings, lm_head, vision tower)
+it is 83.5 GiB per node. "So ~38 GB is free for KV" is the natural guess and it is wrong by ~25 GB. The
+budget below reconciles /proc/meminfo, the per-process RSS, zram, and `nvidia-smi --query-compute-apps`
+(the driver's per-process GPU memory, which on unified memory is host RAM like everything else) to within
+0.5% of `MemTotal - MemAvailable`:
+
+| MiB | what |
+|---|---|
+| 85,500 | model weights (torch, 83.5 GiB) |
+| 6,800 | KV pool (`--kv-cache-memory 7300000000`) |
+| 900 | other torch buffers: indexer K-gather workspace (475, was 4,750 before `patch_indexer_buffer.py`), EXL3 temps, drafter, sampler |
+| 440 | caching-allocator slack (returned every 30 s) |
+| 2,200 | GPU memory outside torch: CUDA context, NCCL/RoCE buffers, CUDA-graph exec objects, compiled kernels (driver view 95,870 vs torch reserved 93,684) |
+| 2,700 | driver-owned shared memory: appears at CUDA context creation, identical on both nodes, untouched by any user-space release |
+| 2,250 | unreclaimable kernel slab (driver page tracking for ~100 GB of mappings, io_uring) |
+| 2,100 | vLLM processes' resident host memory (API server, engine core, worker, resource tracker) |
+| 1,970 | zram store holding 5,800 MiB of the same processes' cold pages (the reclaims' price) |
+| 6,900 | `engined` (Liam's co-tenant): 4,950 RSS + 1,950 GPU memory |
+| 2,600 | desktop + remote desktop (283 GPU) + this Claude session + journald + node |
+| 630 | kernel stacks, page tables, vmalloc, per-cpu |
+| 3,700 | file cache the kernel's watermark math does not count as available (libraries mapped, `watermark_scale_factor=100`) |
+| 5,100 | MemAvailable |
+| **124,545** | MemTotal (121.6 GiB; the other 6.4 GiB of the 128 GiB is carved out before Linux boots) |
+
+So the vLLM stack costs ~97 GB per node before a single KV token, and the head carries ~4.5 GB the worker
+does not (API server, engine core, desktop, this session): the worker sits at 9.5 GB available where the
+head sits at 5.1. TP pins the same KV on both, so the head sets the pool. Every further GB of pool has to
+come from the co-tenant, the desktop, or the swapped-out process pages; the model itself is at its floor.
+
+### 1.11 Boot: 331 s → 159 s
+
+Boot 32 (2026-09-15) spent 126 s in "applying kit patches" and 45 s loading the draft model. Both were waste:
+
+- The video-placeholder overlay installs a `.pth` that imports its module into **every** Python process in
+  the container and applied its patch eagerly, which imports vLLM (torch, transformers): ~5.7 s and ~1 GB per
+  process, times the 22 patcher runs on each node. It now applies lazily from its import hook (the engine
+  still gets it the moment `glm4_1v` is imported); the patch stage is 8 s.
+- The MTP draft model lives in the same checkpoint, and vLLM enumerated all 92 shards for it: InstantTensor
+  streamed 164 GB a second time to pick 3,481 tensors from 4 shards. `kit-patches/patch_mtp_shards.py`
+  filters the shard list through `model.safetensors.index.json` for any model whose class name contains
+  `MTP`: the draft load is 3 s and the second post-load transient is gone.
+- Every worker hop of a boot (30 scp + ~40 ssh calls, including the boot guard's 2 s poll) now shares one
+  multiplexed ssh connection (`SSH_MUX` in `start.sh`), and the orphan-shm cleanup runs on both nodes in
+  parallel.
+
+Boot 34: containers up at +20 s, patches +28 s, engine init +44 s, weights +96 s (35.8 s), draft +100 s,
+KV +128 s, graphs +142 s, healthy +159 s. The dashboard's startup panel is a real stage bar now (each
+stage's boundary comes from the engine log's own timestamps and `start.sh`'s phase file), not a clock.
+
 ### 1.9 Dashboard data as JSON on the same port
 
 `dashboard/dash_server.py` replaces `python -m http.server` for port 3000: it serves the page and mirrors
@@ -378,7 +430,7 @@ First boot: image pull (21.8 GB) + ship to worker + ~5 min load. Success
 looks like:
 
 ```
-GPU KV cache size: 1,945,384 tokens, Maximum concurrency for 900,000 tokens per request: 2.16x
+GPU KV cache size: 1,647,692 tokens, Maximum concurrency for 900,000 tokens per request: 1.83x
 ```
 
 and `curl localhost:8888/v1/models` answering with `glm-5.3-flash`
@@ -396,7 +448,8 @@ GPU/memory/network): run `agent.py` on both nodes (port 9101), `collector.py`
 on the head (port 9102), and serve `index.html` (e.g.
 `python3 -m http.server 3000`).
 
-The 3-D "cortex" panel draws the model itself rather than a cuboid: tokenizer/embedding
+The rail and both KV panels show the pool as tokens (used of total, from the engine's own "GPU KV cache
+size" line, which accounts for every cache group) next to the percentage. The 3-D "cortex" panel draws the model itself rather than a cuboid: tokenizer/embedding
 at the bottom, the 45 decoder layers as plates (34 KDA linear-attention layers with per-head
 cells, 11 DSA sparse-attention layers with 64 context bins and rays from the reading token to
 the bins it selects; 3 dense MLP plates, then 42 MoE plates of 24x12 = 288 experts plus the
