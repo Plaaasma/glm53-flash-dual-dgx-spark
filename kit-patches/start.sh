@@ -214,9 +214,9 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
         *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
         *)
             if [ "$SPEC_METHOD" = "dflash" ]; then
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32 64"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 32 64"   # 3/24/48 dropped 2026-09-17: padded to the next size, fewer graph exec objects
             else
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 8 16 24 32 48 64"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 32 64"   # was 1 2 3 4 8 16 24 32 48 64
             fi
             ;;
     esac
@@ -1272,6 +1272,13 @@ launch_cluster() {
     cleanup_orphan_shm head &
     cleanup_orphan_shm worker &
     wait
+    if [ -n "${GLM53_ZRAM_ALGO:-}" ] && [ -x /usr/local/sbin/glm53-zram ]; then
+        # The old containers are gone, so zram holds almost nothing: re-create it with the configured compressor
+        # and size while 100 GB is free (swapoff needs room for whatever is still in it).
+        ( sudo -n /usr/local/sbin/glm53-zram "$GLM53_ZRAM_ALGO" "${GLM53_ZRAM_GIB:-6}" 2>&1 | sed 's/^/    head:   /' ) &
+        ( worker_ssh "sudo -n /usr/local/sbin/glm53-zram '$GLM53_ZRAM_ALGO' '${GLM53_ZRAM_GIB:-6}'" 2>&1 | sed 's/^/    worker: /' ) &
+        wait
+    fi
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
     worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
@@ -1338,6 +1345,7 @@ launch_cluster() {
         -e "GLM53_INDEXER_PREFILL_MULT=${GLM53_INDEXER_PREFILL_MULT:-}"
         -e "GLM53_MEM_SNAPSHOT=${GLM53_MEM_SNAPSHOT:-0}"
         -e "GLM53_IT_CLEANUP=${GLM53_IT_CLEANUP:-1}"
+        -e "GLM53_MEM_MAINT_TRIM=${GLM53_MEM_MAINT_TRIM:-1}"
         -e "GLM53_NVFP4_KV=$GLM53_NVFP4_KV"
         -e "GLM53_NVFP4_SYNCFREE_T=$GLM53_NVFP4_SYNCFREE_T"
         -e "GLM53_VIZ=$GLM53_VIZ"
@@ -1406,7 +1414,7 @@ launch_cluster() {
              GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
              GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
              GLM53_MM_CAP GLM53_MM_CAP_BATCH GLM53_MM_CHUNK GLM53_MM_COLD_MAX \
-             GLM53_INDEXER_PREFILL_MULT GLM53_MEM_SNAPSHOT GLM53_IT_CLEANUP \
+             GLM53_INDEXER_PREFILL_MULT GLM53_MEM_SNAPSHOT GLM53_IT_CLEANUP GLM53_MEM_MAINT_TRIM \
              GLM53_IT_LOCAL_READS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"

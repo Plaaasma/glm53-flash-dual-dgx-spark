@@ -311,6 +311,31 @@ does not (API server, engine core, desktop, this session): the worker sits at 9.
 head sits at 5.1. TP pins the same KV on both, so the head sets the pool. Every further GB of pool has to
 come from the co-tenant, the desktop, or the swapped-out process pages; the model itself is at its floor.
 
+### 1.10b Small wins staged for the next boot (2026-09-17, not yet measured)
+
+Everything in the budget above that is not weights, KV, firmware or the co-tenant, with what it can give back
+on the head. Applied at the next restart; the first maintenance tick logs each one's real effect.
+
+| expected | change | how |
+|---|---|---|
+| 0.7-1.0 GB | the vLLM processes' glibc heaps: worker 2.5 GB (2.2 GB swapped), engine core 0.5 GB, API server 0.5 GB of freed-but-retained chunks that cost ~1 GB as compressed zram | `malloc_trim(0)` at every maintenance tick in the worker and every 60 s in the engine core (`GLM53_MEM_MAINT_TRIM=1`; first call logs VmRSS/VmSwap before and after) |
+| 0.36 GB | indexer K-gather workspace 475 MB → 119 MB | `GLM53_INDEXER_PREFILL_MULT=1`: one 900K request needs 225K entries; multi-request prefill steps just chunk more |
+| 0.3-0.5 GB | zram store 1.97 GB for 5.8 GB of cold pages at lzo-rle | `host-setup/glm53-zram` re-creates the device with zstd and 10 GiB at each boot (the 6 GiB device was 99.5% full and spilling 1 GB into the file swap) |
+| ~0.2 GB | caching-allocator slack regrowing between 30 s ticks | `GLM53_MEM_MAINT_S=15` |
+| 0.1-0.2 GB | CUDA-graph exec objects for batch sizes 3, 24 and 48 | capture sizes `1 2 4 8 16 32 64`; those batches pad to the next size |
+
+Not staged, larger, and structural: the head carries the API server, the engine core and the resource
+tracker (~2 GB of RAM including their zram share) that the worker does not, which is why the worker has 4.4 GB
+more headroom. Swapping the node roles (API + rank 0 on the node without the desktop, a port forward on the
+old address) would move that 2 GB to where it is free, worth ~450K tokens of pool. `vm.watermark_scale_factor`
+100 holds ~1.2 GB of genuinely free memory out of `MemAvailable` (the watchdog's counter); 50 would show ~0.6 GB
+of it, at the cost of the early-reclaim margin the setting exists for. `--max-num-seqs 8` would trim ~0.3 GB of
+per-sequence buffers and the largest graph, at half the concurrency.
+
+Not cuttable: the 2.7 GB driver shared memory (CUDA context), the 2.25 GB unreclaimable slab (driver page
+tracking), NCCL's buffers (small for 2 ranks over one link), the vision tower and draft layer (features), and
+the KV bytes per token (MLA latent is already NVFP4; FP4 indexer keys need sm_100).
+
 ### 1.11 Boot: 331 s → 159 s
 
 Boot 32 (2026-09-15) spent 126 s in "applying kit patches" and 45 s loading the draft model. Both were waste:

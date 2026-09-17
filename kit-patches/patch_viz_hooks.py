@@ -99,9 +99,41 @@ def main() -> int:
     # 4) scheduler snapshot
     s = V / "v1/core/sched/scheduler.py"
     helper = '''
+def _glm53_core_trim(sched):  ''' + MARK + ''' core-trim
+    """EngineCore heap trim: every 60 s return glibc's free heap pages (the core kept a 0.5 GB heap after boot,
+    almost all of it swapped, 2026-09-17). First call logged with the process deltas."""
+    import os, time
+    if os.environ.get("GLM53_MEM_MAINT_TRIM", "1") != "1":
+        return
+    now = time.monotonic()
+    if now - getattr(sched, "_g53_trim_ts", 0.0) < 60.0:
+        return
+    sched._g53_trim_ts = now
+    try:
+        import ctypes
+        def _st():
+            out = {}
+            with open("/proc/self/status") as f:
+                for l in f:
+                    k = l.split(":")[0]
+                    if k in ("VmRSS", "VmSwap"):
+                        out[k] = int(l.split()[1]) // 1024
+            return out
+        b = _st(); ctypes.CDLL("libc.so.6").malloc_trim(0)
+        if not getattr(sched, "_g53_trim_logged", False):
+            sched._g53_trim_logged = True
+            a = _st()
+            from vllm.logger import init_logger
+            init_logger("vllm.glm53_mem").info("[glm53-mem] core malloc_trim: VmRSS %s -> %s MiB, VmSwap %s -> %s MiB",
+                                               b.get("VmRSS"), a.get("VmRSS"), b.get("VmSwap"), a.get("VmSwap"))
+    except Exception:
+        pass
+
+
 def _glm53_viz_sched(sched, scheduler_output):  ''' + MARK + ''' viz-sched
     """Rate-limited KV-pool / request snapshot for the dashboard (UDP JSON)."""
     import os, time, json, socket
+    _glm53_core_trim(sched)
     if os.environ.get("GLM53_VIZ", "0") != "1":
         return
     now = time.monotonic()

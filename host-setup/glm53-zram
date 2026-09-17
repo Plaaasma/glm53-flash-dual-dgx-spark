@@ -1,0 +1,20 @@
+#!/bin/bash
+# glm53-zram <algorithm> <GiB>: re-create the zram swap with the given compressor and size.
+# Run by start.sh right after the old containers are torn down (zram nearly empty, 100 GB free). zstd compresses
+# the serving processes' cold pages ~30% better than lzo-rle; a larger device keeps the periodic reclaims from
+# spilling to the slow file swap (the 6 GiB zram was 99.5% full on 2026-09-17). Priority 100 like setup-node.sh.
+set -u
+algo="${1:?algorithm}"; gib="${2:?GiB}"; dev=/dev/zram0
+cur_algo=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/block/zram0/comp_algorithm 2>/dev/null)
+cur_gib=$(( $(cat /sys/block/zram0/disksize 2>/dev/null || echo 0) / 1073741824 ))
+if [ "$cur_algo" = "$algo" ] && [ "$cur_gib" = "$gib" ] && grep -q "^$dev " /proc/swaps; then
+    echo "zram already $algo ${gib}G"; exit 0
+fi
+used=$(awk -v d="$dev" '$1==d {print int($4/1024)}' /proc/swaps); avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+if [ "${used:-0}" -gt $(( ${avail:-0} - 4096 )) ]; then echo "zram holds ${used} MiB with only ${avail} MiB available - leaving it"; exit 0; fi
+t0=$(date +%s)
+swapoff "$dev" 2>/dev/null || true
+echo 1 > /sys/block/zram0/reset || { echo "zram reset failed"; exit 1; }
+echo "$algo" > /sys/block/zram0/comp_algorithm || { echo "algorithm $algo not accepted"; exit 1; }
+echo "${gib}G" > /sys/block/zram0/disksize
+mkswap -q "$dev" && swapon -p 100 "$dev" && echo "zram re-created: $algo ${gib}G (was $cur_algo ${cur_gib}G, ${used:-0} MiB moved back) in $(( $(date +%s) - t0 ))s"

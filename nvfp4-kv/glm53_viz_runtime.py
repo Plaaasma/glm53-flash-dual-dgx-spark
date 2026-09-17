@@ -184,6 +184,41 @@ def record_ribbon(layer_idx: int, hidden: torch.Tensor) -> None:
 _MAINT_EVERY = float(os.environ.get("GLM53_MEM_MAINT_S", "600"))
 _MEM_SNAPSHOT = os.environ.get("GLM53_MEM_SNAPSHOT", "0") == "1"      # dump a torch allocator snapshot once after boot
 _IT_CLEANUP = os.environ.get("GLM53_IT_CLEANUP", "1") == "1"         # release InstantTensor's global buffers once loading is over
+_MAINT_TRIM = os.environ.get("GLM53_MEM_MAINT_TRIM", "1") == "1"     # glibc malloc_trim(0) at every maintenance tick
+_trim_logged = False
+
+
+def _proc_mib(keys=("VmRSS", "VmSwap")):
+    out = {}
+    try:
+        with open("/proc/self/status") as f:
+            for l in f:
+                k = l.split(":")[0]
+                if k in keys:
+                    out[k] = int(l.split()[1]) // 1024
+    except Exception:
+        pass
+    return out
+
+
+def _malloc_trim(log) -> None:
+    """Return glibc's free heap pages to the OS. After loading 150K tensors the worker keeps a ~2.5 GB heap of
+    freed-but-retained chunks (2.2 GB of it swapped to zram at steady state, 2026-09-17); MADV_DONTNEED on free
+    pages drops them and their swap slots. First call is logged with the process deltas."""
+    global _trim_logged
+    if not _MAINT_TRIM:
+        return
+    try:
+        import ctypes
+        before = _proc_mib()
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+        if not _trim_logged:
+            _trim_logged = True
+            after = _proc_mib()
+            log.info("[glm53-mem] malloc_trim: VmRSS %s -> %s MiB, VmSwap %s -> %s MiB",
+                     before.get("VmRSS"), after.get("VmRSS"), before.get("VmSwap"), after.get("VmSwap"))
+    except Exception as e:
+        log.warning("[glm53-mem] malloc_trim skipped: %r", e)
 _it_done = False
 
 
@@ -310,6 +345,7 @@ def _mem_maint() -> None:
                     avail = int(l.split()[1]) // 1024; break
         if not torch.cuda.is_current_stream_capturing():
             _it_cleanup(log)
+            _malloc_trim(log)
         _mem_snapshot("steady")
         a0, r0 = torch.cuda.memory_allocated() / 2**20, torch.cuda.memory_reserved() / 2**20
         peak = torch.cuda.max_memory_allocated() / 2**20          # highest torch allocation since the last tick
