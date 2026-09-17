@@ -336,6 +336,23 @@ Not cuttable: the 2.7 GB driver shared memory (CUDA context), the 2.25 GB unrecl
 tracking), NCCL's buffers (small for 2 ranks over one link), the vision tower and draft layer (features), and
 the KV bytes per token (MLA latent is already NVFP4; FP4 indexer keys need sm_100).
 
+### 1.10c Node roles: run the head on the node without the desktop (2026-09-17)
+
+The head (API server, engine core, rank 0) costs ~2 GB of host RAM that the worker does not, and on this
+pair the node with the desktop, the remote-desktop session and the co-tenant was also the head. Swapping
+the roles puts the head on the quieter node and turns that 2 GB into pool:
+
+- The kit is rsynced to the new head (`/home/liam/glm53/exl3-kit`, `/home/liam/glm53/nvfp4-vllm`) and its
+  `.env` swaps `HEAD_IP`/`WORKER_IP`; `WORKER_SSH` follows. `start.sh` runs there. The new head needs an ssh
+  key into the new worker and the two root helpers (`glm53-reclaim`, `glm53-zram`) with their sudoers entries
+  on both nodes (already the case if both were set up by section 1).
+- Clients keep the old address: `host-setup/glm53-api-forward.service` (socat) forwards `:8888` on the old
+  head to the new one over the fabric link. Root's reclaim crons name the container on each node; swap them.
+- The dashboard stays where it was: `collector.py` reaches the head container with `docker -H ssh://<head>`,
+  reads metrics at `<head>:8888`, the boot phase file over ssh, and binds the viz UDP port on `0.0.0.0` so
+  the engine hooks (`GLM53_VIZ_UDP=<dashboard-node fabric IP>:9103` in the head's `.env`) reach it. The
+  watchdog is role-agnostic (`pkill -f VLLM::` plus both container names).
+
 ### 1.11 Boot: 331 s → 159 s
 
 Boot 32 (2026-09-15) spent 126 s in "applying kit patches" and 45 s loading the draft model. Both were waste:

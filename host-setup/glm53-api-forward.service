@@ -1,0 +1,9 @@
+[Unit]
+Description=Forward gx10-a400:8888 to the vLLM head on SparkyPoo (node roles swapped 2026-09-17)
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/socat -T 3600 TCP-LISTEN:8888,fork,reuseaddr,bind=0.0.0.0,keepalive TCP:169.254.152.37:8888,keepalive
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

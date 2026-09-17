@@ -16,7 +16,13 @@ from urllib.parse import urlparse, parse_qs
 
 DB_PATH = "/home/liam/cluster-dashboard/history.db"
 VLLM = "http://localhost:8000/metrics"
-SGLANG = "http://localhost:8888/metrics"
+# Node roles swapped 2026-09-17: the vLLM head (API server, engine core, rank 0) runs on SparkyPoo; this collector
+# stays on gx10-a400 next to the desktop. The head container is reached through docker's ssh transport (one
+# multiplexed connection), the metrics directly over the fabric, and the engine's viz UDP arrives on the fabric IP.
+HEAD_SSH = os.environ.get("GLM53_HEAD_SSH", "liam@169.254.152.37")
+HEAD_KIT = os.environ.get("GLM53_HEAD_KIT", "/home/liam/glm53/exl3-kit")
+DOCKER = ["docker", "-H", f"ssh://{HEAD_SSH}"] if HEAD_SSH else ["docker"]
+SGLANG = "http://169.254.152.37:8888/metrics"
 AGENTS = {"h": "http://localhost:9101/stats", "w": "http://169.254.152.37:9101/stats"}
 TICK = 2.5
 RETAIN_S = 35 * 86400          # keep 35 days
@@ -116,7 +122,7 @@ import re as _re
 import subprocess as _sp
 import json as _json
 import datetime as _dt
-BOOT_STATE = "/home/liam/glm53/exl3-kit/logs/boot-state.json"
+BOOT_STATE = HEAD_KIT + "/logs/boot-state.json"
 # (key, label, typical seconds, marker regex in the head log that ENDS the stage; None = ended by state file)
 _BOOT_STAGES = [
     ("teardown", "stopping old containers, shipping files", 20, None),
@@ -134,7 +140,7 @@ _boot_cache = {"t": 0.0, "log": "", "started": None}
 
 def _container_state():
     try:
-        out = _sp.run(["docker", "inspect", "-f", "{{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
+        out = _sp.run(DOCKER + ["inspect", "-f", "{{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
                        "glm53-exl3-head"], capture_output=True, text=True, timeout=3)
         if out.returncode != 0:
             return None, None, None
@@ -150,7 +156,7 @@ def _head_log(started):
     if now - _boot_cache["t"] < 2.0 and _boot_cache["started"] == started:
         return _boot_cache["log"]
     try:
-        out = _sp.run(["docker", "logs", "--timestamps", "glm53-exl3-head"], capture_output=True, text=True, timeout=5)
+        out = _sp.run(DOCKER + ["logs", "--timestamps", "glm53-exl3-head"], capture_output=True, text=True, timeout=8)
         log = (out.stdout or "") + (out.stderr or "")
     except Exception:
         log = ""
@@ -164,12 +170,27 @@ def _line_ts(line):
     s = m.group(1)
     return _dt.datetime.fromisoformat(s[:26] + "+00:00").timestamp()
 
+_state_cache = {"t": 0.0, "v": None}
+
 def _read_state():
+    """start.sh's phase file lives on the head node; read it over the multiplexed ssh connection, cached 2 s."""
+    now = time.time()
+    if now - _state_cache["t"] < 2.0:
+        return _state_cache["v"]
+    v = None
     try:
-        with open(BOOT_STATE) as f:
-            return _json.load(f)
+        if HEAD_SSH:
+            r = _sp.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
+                         "-o", "ControlPath=/tmp/glm53-mux-%C", "-o", "ControlPersist=120", HEAD_SSH, "cat", BOOT_STATE],
+                        capture_output=True, text=True, timeout=5)
+            v = _json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+        else:
+            with open(BOOT_STATE) as f:
+                v = _json.load(f)
     except Exception:
-        return None
+        v = None
+    _state_cache.update(t=now, v=v)
+    return v
 
 def boot_progress():
     """None when serving; else {stage, stage_key, stage_idx, n_stages, pct, eta_s, elapsed_s, stages:[...], failed}."""
@@ -259,7 +280,7 @@ def kv_total_tokens():
     tokens = None
     if st == "running":
         try:
-            out = _sp.run(["docker", "logs", "glm53-exl3-head"], capture_output=True, text=True, timeout=5)
+            out = _sp.run(DOCKER + ["logs", "glm53-exl3-head"], capture_output=True, text=True, timeout=8)
             for ln in reversed((out.stdout + out.stderr).splitlines()):
                 m = _re.search(r"GPU KV cache size:\s*([\d,]+)\s*tokens", ln)
                 if m:
@@ -529,7 +550,7 @@ def viz_udp_listener(port=9103):
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
-    s.bind(("127.0.0.1", port))
+    s.bind(("0.0.0.0", port))   # the engine hooks send from the head node over the fabric
     while True:
         try:
             data, _ = s.recvfrom(65535)
