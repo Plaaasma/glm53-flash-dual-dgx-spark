@@ -1,11 +1,11 @@
-# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 1.65M-token KV pool next to a 12 GB co-tenant, 159 s boots
+# GLM-5.3-Flash (Uncensored, EXL3 4bpw) on 2× NVIDIA DGX Spark — 2.7M-token KV pool, 133 s boots
 
 A complete, battle-tested recipe for serving **GLM-5.3-Flash** (320B/18B MoE,
 vision included) across **two DGX Sparks (GB10, sm_121)** with:
 
-- **1,647,692-token KV pool** at a 7.3 GB per-node pin, sized so that a 6 GB
-  per-node co-tenant process still leaves 3 GB of headroom (section 1.10 has
-  the measured budget); two ~460K-token agent sessions stay prefix-cached
+- **2,713,846-token KV pool** at a 12 GB per-node pin with the head on the
+  node without the desktop (sections 1.10-1.10c have the measured budget);
+  three full 900K contexts, or five ~460K agent sessions, stay prefix-cached
 - **NVFP4 KV cache** — 288 B/token vs the stock 656 B `fp8_ds_mla` (2.28×
   denser), via a gather-dequant Triton path feeding the stock prebuilt kernel
 - **16 concurrency slots**, 900K max context per request, MTP speculative
@@ -37,14 +37,14 @@ Measured speeds: section 8 (production logs, 2026-09-10/11) and
 | Image / engine | `glm53-flash-sm121:local-0904-it` (21.8 GB, built 2026-09-04), vLLM fork `v0.1.dev20051+g487ecf187` |
 | Host | DGX OS kernel 6.17.0-1026-nvidia, driver 580.159.03, GB10 121.63 GiB unified per node |
 | Weights | `neko-legends/GLM-5.3-Flash-Uncensored-EXL3` rev `1fac3dbe`, 92 shards, 163.65 GiB, on both nodes |
-| KV pool | `--kv-cache-memory 7300000000` per node → 1,647,692 tokens (page IDs of 7936 tokens shared by 5 cache groups) |
+| KV pool | `--kv-cache-memory 12000000000` per node → 2,713,846 tokens (page IDs of 7936 tokens shared by 5 cache groups) |
 | Limits | `MAX_MODEL_LEN=900000`, `MAX_NUM_SEQS=16`, `MAX_NUM_BATCHED_TOKENS=2048`, `--prefix-match-unit 64` |
 | Speculative decode | `SPEC_METHOD=mtp`, `MTP_TOKENS=3`, dynamic `[[1,2,3],[3,16,2]]` (3 drafts at 1-2 streams, 2 at 3-16) |
 | Prefill | `GLM53_EXL3_MT=1` variant 8 (auto), ladder `1:1024,2:512,4:256,*:128`, `GLM53_PREFILL_CHUNK_CTX_BUDGET=3e8`, `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=128`, `GLM53_INDEXER_PREFILL_MULT=4` |
 | Prefix cache | `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=63488` (KDA checkpoint every 8 pages) |
 | Multimodal | 800 images per prompt, `max_image_tokens=1024` (1008 per 1080p), lru processor cache 0.75 GiB (~80 images), chunks of 4, 16 cold images per request |
 | Memory guard | watchdog at 0.75 GiB, boot guard at 4.5 GiB (3 GiB, 6 s throttle), post-load / pre-API / post-ready reclaim 4/3/3 GiB, cron reclaim 2 GiB every 20 min + every minute under 2.5 GiB, in-engine maintenance every 30 s |
-| Boot | launch → healthy **159 s** (boot 34; was 249-346 s before section 1.11) |
+| Boot | launch → healthy **133-139 s** (boots 35-36; was 249-346 s before section 1.11) |
 | Ports | API 8888, dashboard + JSON 3000, collector 9102, node agents 9101, viz UDP 9103 |
 
 ---
@@ -476,7 +476,7 @@ First boot: image pull (21.8 GB) + ship to worker + ~5 min load. Success
 looks like:
 
 ```
-GPU KV cache size: 1,647,692 tokens, Maximum concurrency for 900,000 tokens per request: 1.83x
+GPU KV cache size: 2,713,846 tokens, Maximum concurrency for 900,000 tokens per request: 3.02x
 ```
 
 and `curl localhost:8888/v1/models` answering with `glm-5.3-flash`
@@ -551,6 +551,7 @@ Rollback: `GLM53_NVFP4_KV=0` in `.env` + restart.
 | a 460K session re-prefills from zero minutes after its last turn | its KDA checkpoints were the oldest blocks and got evicted during a fan-out (section 1.8) | `patch_apc_refresh.py` (keeps checkpoints young); keep concurrent large sessions to two |
 | server dies the moment you run a diagnostic inside the container | a `docker exec python3` that imports vLLM/torch costs ~1 GB and the watchdog counts it | read the image from a throwaway `docker run --rm` container with shell tools; never exec Python in the serving container |
 | 133 orphaned `/dev/shm/psm_*` segments, 690 MiB | watchdog kills never unlink vLLM's shared memory (`--ipc=host`) | `start.sh` runs `kit-patches/shm_cleanup.py` on both nodes at launch |
+| head exits 0 with `RuntimeError: cancelled` after `CUDA error: an illegal memory access` inside a CUDA-graph replay; kernel log shows `Xid 31 ... MMU Fault` | a kernel in the decode graph computed an unmapped address (2026-09-18, once in 25 h, 1-token step at 170K context; GPU healthy after) | restart; `nvfp4-kv/glm53_nvfp4_runtime.py` now clamps gathered pool rows to the pool's range as insurance; the container log is worth saving before `start.sh` removes it |
 
 ## 8. Benchmarks
 

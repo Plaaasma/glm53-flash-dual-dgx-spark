@@ -85,13 +85,17 @@ def _e2m1(mag):
 
 
 @triton.jit
-def _gather_kernel(pool_ptr, idx_ptr, out_u8_ptr, out_f32_ptr, S,
+def _gather_kernel(pool_ptr, idx_ptr, out_u8_ptr, out_f32_ptr, S, POOL_ROWS,
                    HALF: tl.constexpr):
     row = tl.program_id(0)
     if row >= S:
         return
     src = tl.load(idx_ptr + row).to(tl.int64)
-    src = tl.maximum(src, 0)  # -1-padded table entries: gather row 0, consumer masks them
+    # -1-padded entries gather row 0; the consumer masks them by topk_lengths. Slots past a row's valid count are
+    # never written by the index-conversion kernel, so under CUDA-graph replay they hold whatever another graph
+    # left in that memory: clamp to the pool so a garbage index can never address outside it (Xid 31 MMU fault
+    # inside a replayed decode graph at 170K context, 2026-09-18, one in 25 h).
+    src = tl.minimum(tl.maximum(src, 0), POOL_ROWS - 1)
     b = tl.arange(0, HALF)
     byts = tl.load(pool_ptr + src * 288 + b).to(tl.int32)
     lo_c = byts & 0xF
@@ -124,7 +128,7 @@ _bufs: dict = {}
 def _gather(pool: torch.Tensor, idx: torch.Tensor, out: torch.Tensor) -> None:
     S = idx.shape[0]
     f32 = out.reshape(-1).view(torch.float32).reshape(out.shape[0], DS_BYTES // 4)
-    _gather_kernel[(S,)](pool, idx, out, f32, S, HALF=256, num_warps=4)
+    _gather_kernel[(S,)](pool, idx, out, f32, S, pool.shape[0], HALF=256, num_warps=4)
 
 
 # Sync-free ceiling: the largest step that must stay host-sync-free. Mixed
