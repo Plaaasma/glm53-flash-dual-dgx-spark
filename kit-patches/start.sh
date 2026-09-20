@@ -175,19 +175,22 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
-NVFP4_PATCH_HOST="${NVFP4_PATCH_HOST:-/home/liam/glm53/nvfp4-vllm/patch_nvfp4_kv.py}"
-NVFP4_RT_HOST="${NVFP4_RT_HOST:-/home/liam/glm53/nvfp4-vllm/glm53_nvfp4_runtime.py}"
+# The NVFP4 KV pool, the viz runtime and the M-tiled MoE kernel live next to the kit (../nvfp4-vllm, laid out by
+# apply-kit-patches.sh); NVFP4_DIR overrides.
+NVFP4_DIR="${NVFP4_DIR:-$SCRIPT_DIR/../nvfp4-vllm}"
+NVFP4_PATCH_HOST="${NVFP4_PATCH_HOST:-$NVFP4_DIR/patch_nvfp4_kv.py}"
+NVFP4_RT_HOST="${NVFP4_RT_HOST:-$NVFP4_DIR/glm53_nvfp4_runtime.py}"
 DYNSD_PATCH_HOST="${DYNSD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dynamic_sd_cg.py}"
 KPOOLFG_PATCH_HOST="${KPOOLFG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_finegrained.py}"
 QUIETLOG_PATCH_HOST="${QUIETLOG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_quiet_iteration_log.py}"
 VIZ_PATCH_HOST="${VIZ_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_viz_hooks.py}"
-VIZ_RT_HOST="${VIZ_RT_HOST:-/home/liam/glm53/nvfp4-vllm/glm53_viz_runtime.py}"
+VIZ_RT_HOST="${VIZ_RT_HOST:-$NVFP4_DIR/glm53_viz_runtime.py}"
 LIVECTR_PATCH_HOST="${LIVECTR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_live_step_counters.py}"
 ITLOCAL_PATCH_HOST="${ITLOCAL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_instanttensor_local.py}"
 LOADDIAG_PATCH_HOST="${LOADDIAG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_diag.py}"
 LOADREL_PATCH_HOST="${LOADREL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_release.py}"
 EXL3MT_PATCH_HOST="${EXL3MT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_mt.py}"
-EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-/home/liam/glm53/nvfp4-vllm/exl3-mt/glm53_exl3_mt.so}"
+EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-$NVFP4_DIR/exl3-mt/glm53_exl3_mt.so}"
 MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 MMCHUNK_PATCH_HOST="${MMCHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_chunk.py}"
 APCPROBE_PATCH_HOST="${APCPROBE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_probe.py}"
@@ -401,7 +404,7 @@ postload_reclaim_watch() {
     done
     # Pre-API reclaim (2026-09-15): the boot's memory PEAK is the API server's startup right after graph
     # capture (imports, tokenizer, image processor), ~3 GiB above steady state. Boots 30/31 died there with
-    # engined at 6 GB on the head even after the KV pin was halved. Push cold pages out first.
+    # a 6 GB co-tenant process on the head even after the KV pin was halved. Push cold pages out first.
     local m="${GLM53_PREAPI_RECLAIM:-3}"
     [ "$m" != "0" ] || return 0
     for i in $(seq 1 600); do

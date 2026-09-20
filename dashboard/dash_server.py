@@ -7,14 +7,14 @@
                              ?window=SECONDS&points=N to size the history; defaults 900 s / 60 points)
   GET /api/live              collector live sample: engine state, model, per-tick rates (row), node stats
   GET /api/derived           the numbers the page computes client-side (per-stream tok/s, prefilling,
-                             KV pool pages, est. bandwidth, engined per node)
+                             KV pool pages, est. bandwidth, watched host processes per node)
   GET /api/requests          per-request progress (id, prompt/computed/total tokens, phase, progress %)
   GET /api/nodes             both nodes' agent stats (gpu, memory, cpu, net, disk, watched processes)
   GET /api/viz               activation telemetry (expert routing, attention scan, ribbon, 3-D frames, scheduler)
   GET /api/viz/status        just the telemetry health block
   GET /api/totals            lifetime input/output tokens (integrated from the history DB)
   GET /api/history?from&to&points   history series (same query as the collector)
-  GET /api/engined           engined memory watch (both nodes, caps, alert state)
+  GET /api/procs             watched host processes per node (MiB, RSS + GPU memory), caps, optional alert file
 
 Data comes from the collector on :9102; this server proxies it so one address and port serve both humans and
 programs. All responses carry Access-Control-Allow-Origin: *.
@@ -26,8 +26,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 COLLECTOR = os.environ.get("COLLECTOR", "http://127.0.0.1:9102")
 PORT = int(os.environ.get("PORT", "3000"))
 PAGE_TOKENS = 7936          # hybrid page size on this stack (attention block == KDA state page)
+# Watched host processes (agent.py SPARK_WATCH_PROCS): optional per-node and total caps in MiB (0 = none) and an
+# optional alert JSON written by an external watch, surfaced as-is under /api/procs.
+PROC_CAP_MIB = int(os.environ.get("SPARK_PROC_CAP_MIB", "0") or 0)
+PROC_CAP_TOTAL_MIB = int(os.environ.get("SPARK_PROC_CAP_TOTAL_MIB", "0") or 0)
+PROC_ALERT_JSON = os.environ.get("SPARK_PROC_ALERT_JSON", "")
 ENDPOINTS = ["/api", "/api/all", "/api/live", "/api/derived", "/api/requests", "/api/nodes", "/api/viz",
-             "/api/viz/status", "/api/totals", "/api/history", "/api/engined"]
+             "/api/viz/status", "/api/totals", "/api/history", "/api/procs"]
 
 
 def fetch(path, timeout=4.0):
@@ -88,8 +93,8 @@ def derive(live, viz):
             "host": n.get("host"), "gpu_util_pct": g.get("util"), "gpu_power_w": g.get("power"), "gpu_temp_c": g.get("temp"),
             "gpu_sm_mhz": g.get("sm_mhz"), "mem_used_gib": m.get("used_gib"), "mem_total_gib": m.get("total_gib"),
             "cpu_pct": n.get("cpu_pct"), "net_mb_s": r.get(f"{k}_net"), "load1": n.get("load1"),
-            "engined_mib": (n.get("procs") or {}).get("engined"),
-            "engined_over_cap": ((n.get("procs") or {}).get("engined") or 0) > 6144,
+            "watched_procs_mib": n.get("procs") or {},
+            "procs_over_cap": bool(PROC_CAP_MIB and sum((n.get("procs") or {}).values()) > PROC_CAP_MIB),
         }
     return out
 
@@ -113,21 +118,17 @@ def requests_view(viz):
     return out
 
 
-def engined_view():
-    out = {"alert": None, "last_sample": None}
-    try:
-        with open(os.path.join(ROOT, "engined_alert.json")) as f:
-            out["alert"] = json.load(f)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        with open(os.path.join(ROOT, "engined_watch.log")) as f:
-            lines = f.read().strip().splitlines()
-        if lines:
-            out["last_sample"] = lines[-1]
-    except Exception:  # noqa: BLE001
-        pass
-    out["caps_mib"] = {"per_node": 6144, "total": 12288}
+def procs_view():
+    live = fetch("/live")
+    nodes = (live or {}).get("nodes") or {}
+    out = {"per_node": {k: ((n or {}).get("procs") or {}) for k, n in nodes.items()},
+           "caps_mib": {"per_node": PROC_CAP_MIB or None, "total": PROC_CAP_TOTAL_MIB or None}, "alert": None}
+    if PROC_ALERT_JSON:
+        try:
+            with open(PROC_ALERT_JSON) as f:
+                out["alert"] = json.load(f)
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 
@@ -170,8 +171,8 @@ class H(SimpleHTTPRequestHandler):
             return self._json(derive(fetch("/live"), fetch("/viz")))
         if p == "/api/requests":
             return self._json({"requests": requests_view(fetch("/viz")), "ts": now})
-        if p == "/api/engined":
-            return self._json(engined_view())
+        if p == "/api/procs":
+            return self._json(procs_view())
         if p == "/api/all":
             window = int(q.get("window", ["900"])[0]); points = int(q.get("points", ["60"])[0])
             with_viz = q.get("viz", ["0"])[0] == "1"
@@ -180,7 +181,7 @@ class H(SimpleHTTPRequestHandler):
             doc = {
                 "ts": now, "engine_up": live.get("engine_up"), "model": live.get("model"), "engine": live.get("engine"), "boot": live.get("boot"),
                 "derived": derive(live, viz), "requests": requests_view(viz), "row": live.get("row"), "nodes": live.get("nodes"),
-                "kv_scheduler_snapshot": viz.get("sched"), "viz_status": viz.get("status"), "totals": totals, "engined": engined_view(),
+                "kv_scheduler_snapshot": viz.get("sched"), "viz_status": viz.get("status"), "totals": totals, "procs": procs_view(),
                 "history": hist, "history_window_s": window,
             }
             if with_viz:

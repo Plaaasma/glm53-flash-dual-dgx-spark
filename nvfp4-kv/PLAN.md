@@ -11,7 +11,7 @@ doesn't need to be: decode converts topk indices to PER-TOKEN physical rows
 (block=1). Seam: dequant the selected NVFP4 rows -> fp8 scratch (656-B layout),
 renumber indices to scratch rows, launch unchanged kernel on the scratch.
 Our bit-exact kernels port directly:
-  /home/liam/glm53/patches/nvfp4_gather.py  (quantize_to_nvfp4_triton,
+  patches/nvfp4_gather.py (an earlier prototype)  (quantize_to_nvfp4_triton,
   gather_dequant_nvfp4_to_fp8, arithmetic e2m1 decode)
 
 ## Recon facts (image glm53-flash-sm121:local-0831)
@@ -31,11 +31,11 @@ Our bit-exact kernels port directly:
 - CUDA-graph interplay: scratch buffer must be capture-safe (fixed shapes:
   seqs x topk=2048 x 656). UNKNOWN #3 (graph mode FULL_AND_PIECEWISE).
 
-## Phases (each service-touching step needs an explicit OK from Liam)
+## Phases (each service-touching step needs an explicit OK from the operator)
 1. [read-only] finish recon: write op, active prefill backend, graph shapes.
 2. [no service] port nvfp4_gather.py; standalone GPU tests on spare memory
    (bit-exactness vs pool rows; scratch layout match incl. 4B scale word).
-3. [no service] integration patch set in /home/liam/glm53/nvfp4-vllm/overlay/:
+3. [no service] integration patch set in nvfp4-vllm/overlay/:
    new cache_dtype "nvfp4_ds_mla" (288 B), write-path quantize hook, decode
    gather-dequant + index renumber, prefill equivalent. Mount via start.sh
    pattern (proven) or bake with BUILD=1 (preferred after the mount lesson:

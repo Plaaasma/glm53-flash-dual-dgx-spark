@@ -108,9 +108,12 @@ def read_disk():
     return {"total_gib": round(total, 1), "used_gib": round(total - free, 1)}
 
 
-# Watched host processes (RSS in MiB, summed over all processes with that comm). engined = Liam's
-# claustro-engined-arena.service on the worker; he capped it at 4 GB (2026-09-08) and wants to see it.
-WATCH_PROCS = ("engined",)
+# Watched host processes: RSS in MiB summed over all processes with that comm, plus the GPU memory the driver
+# attributes to them (SPARK_WATCH_PROCS; see below).
+# Host processes to report per node: RSS plus the GPU memory the driver attributes to them (both are unified
+# memory on a Spark, so both compete with vLLM's headroom). Comma-separated command names, e.g.
+# SPARK_WATCH_PROCS=myservice,otherd. Empty = report none.
+WATCH_PROCS = tuple(x.strip() for x in os.environ.get("SPARK_WATCH_PROCS", "").split(",") if x.strip())
 
 
 def _gpu_mem_by_comm():

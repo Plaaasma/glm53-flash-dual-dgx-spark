@@ -224,14 +224,14 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
     <div class="sec">
       <div class="cap">nodes</div>
       <div class="node" id="node_h">
-        <div class="nh"><b>gx10-a400</b><span>HEAD · API</span></div>
+        <div class="nh"><b id="nn_h">node A</b><span id="nr_h">HEAD · API</span></div>
         <div class="meter" id="m_h_gpu"><div class="ml"><span>gpu</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
         <div class="meter" id="m_h_mem"><div class="ml"><span>memory</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
         <div class="meter" id="m_h_tmp"><div class="ml"><span>temp</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
         <div class="nfoot" id="i_h">—</div>
       </div>
       <div class="node" id="node_w">
-        <div class="nh"><b>SparkyPoo</b><span>WORKER</span></div>
+        <div class="nh"><b id="nn_w">node B</b><span id="nr_w">WORKER</span></div>
         <div class="meter" id="m_w_gpu"><div class="ml"><span>gpu</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
         <div class="meter" id="m_w_mem"><div class="ml"><span>memory</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
         <div class="meter" id="m_w_tmp"><div class="ml"><span>temp</span><span class="mv">—</span></div><div class="tr"><div class="fl"></div></div></div>
@@ -471,12 +471,14 @@ function renderRail(){
     meter(`m_${k}_gpu`, n.gpu.util, 100, v=>Math.round(v)+"%", 101, 85);
     meter(`m_${k}_mem`, n.mem.used_gib, n.mem.total_gib||121.6, v=>v.toFixed(1)+"G", 120.9, 120.0);
     meter(`m_${k}_tmp`, n.gpu.temp, 95, v=>Math.round(v)+"°", 82, 74);
-    const eng = n.procs && n.procs.engined != null ? n.procs.engined : null;   // MiB, worker only (Liam's cap: 4 GB)
-    const engOver = eng != null && eng > 6144;
+    if (n.host) $(`nn_${k}`).textContent = n.host;                                   // hostname reported by the node agent
+    { const labels = d.node_labels || [], li = k === "h" ? 0 : 1; if (labels[li]) $(`nr_${k}`).textContent = labels[li]; }
+    // watched host processes (agent SPARK_WATCH_PROCS): RSS + GPU memory, MiB; over-cap when their sum passes proc_cap_mib
+    const procs = n.procs || {}, cap = d.proc_cap_mib || 0, ptot = Object.values(procs).reduce((a,b)=>a+(b||0),0), over = cap > 0 && ptot > cap;
+    const ptxt = Object.entries(procs).map(([nm,mib]) => ` · ${nm} ${(mib/1024).toFixed(2)} GB`).join("") + (over ? ` ⚠ OVER ${(cap/1024).toFixed(0)} GB CAP` : "");
     $(`i_${k}`).textContent =
-      `${Math.round(n.gpu.power??0)} W · ${r[k+"_net"]!=null?fmtN(r[k+"_net"]):"—"} MB/s · cpu ${Math.round(n.cpu_pct??0)}%` +
-      (eng != null ? ` · engined ${(eng/1024).toFixed(2)} GB${engOver ? " ⚠ OVER 6 GB CAP" : ""}` : "");
-    $(`i_${k}`).classList.toggle("alert", engOver);
+      `${Math.round(n.gpu.power??0)} W · ${r[k+"_net"]!=null?fmtN(r[k+"_net"]):"—"} MB/s · cpu ${Math.round(n.cpu_pct??0)}%` + ptxt;
+    $(`i_${k}`).classList.toggle("alert", over);
   }
 }
 function meter(id, v, max, f, hot, mid){

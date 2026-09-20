@@ -1,8 +1,11 @@
 [Unit]
-Description=Forward gx10-a400:8888 to the vLLM head on SparkyPoo (node roles swapped 2026-09-17)
+# Keeps the API reachable at the old head's address after the vLLM head moved to the other node (README: node
+# roles). Replace HEAD_FABRIC_IP with the new head's CX7 link-local address, install on the old head, and
+# `systemctl enable --now glm53-api-forward`. Needs socat.
+Description=Forward :8888 on this node to the vLLM head over the CX7 fabric
 After=network-online.target
 [Service]
-ExecStart=/usr/bin/socat -T 3600 TCP-LISTEN:8888,fork,reuseaddr,bind=0.0.0.0,keepalive TCP:169.254.152.37:8888,keepalive
+ExecStart=/usr/bin/socat -T 3600 TCP-LISTEN:8888,fork,reuseaddr,bind=0.0.0.0,keepalive TCP:HEAD_FABRIC_IP:8888,keepalive
 Restart=always
 RestartSec=2
 [Install]

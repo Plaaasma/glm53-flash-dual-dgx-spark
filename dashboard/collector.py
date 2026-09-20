@@ -14,16 +14,21 @@ import json, os, sqlite3, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-DB_PATH = "/home/liam/cluster-dashboard/history.db"
+DB_PATH = os.environ.get("SPARK_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.db"))
 VLLM = "http://localhost:8000/metrics"
-# Node roles swapped 2026-09-17: the vLLM head (API server, engine core, rank 0) runs on SparkyPoo; this collector
-# stays on gx10-a400 next to the desktop. The head container is reached through docker's ssh transport (one
-# multiplexed connection), the metrics directly over the fabric, and the engine's viz UDP arrives on the fabric IP.
-HEAD_SSH = os.environ.get("GLM53_HEAD_SSH", "liam@169.254.152.37")
-HEAD_KIT = os.environ.get("GLM53_HEAD_KIT", "/home/liam/glm53/exl3-kit")
+# Where the vLLM head runs. Empty GLM53_HEAD_SSH (default) = this node: local docker, metrics on localhost.
+# Set it to user@<head fabric IP> when the head is the other node: the head container is then reached through
+# docker's ssh transport (one multiplexed connection), metrics over VLLM_METRICS_URL, the boot phase file over
+# ssh, and the engine's viz UDP must be pointed at this node (GLM53_VIZ_UDP in the head's .env).
+HEAD_SSH = os.environ.get("GLM53_HEAD_SSH", "")
+HEAD_KIT = os.environ.get("GLM53_HEAD_KIT", os.path.expanduser("~/glm53/exl3-kit"))
 DOCKER = ["docker", "-H", f"ssh://{HEAD_SSH}"] if HEAD_SSH else ["docker"]
-SGLANG = "http://169.254.152.37:8888/metrics"
-AGENTS = {"h": "http://localhost:9101/stats", "w": "http://169.254.152.37:9101/stats"}
+SGLANG = os.environ.get("VLLM_METRICS_URL", "http://localhost:8888/metrics")
+# Node agents (agent.py on :9101): "h" is the node this collector runs on, "w" the other node.
+AGENTS = {"h": os.environ.get("SPARK_AGENT_H", "http://localhost:9101/stats"),
+          "w": os.environ.get("SPARK_AGENT_W", "")}
+NODE_LABELS = os.environ.get("SPARK_NODE_LABELS", "HEAD · API,WORKER").split(",")   # role labels for the page, h then w
+PROC_CAP_MIB = int(os.environ.get("SPARK_PROC_CAP_MIB", "0") or 0)                  # per-node cap for watched processes, 0 = none
 TICK = 2.5
 RETAIN_S = 35 * 86400          # keep 35 days
 HIST_WINDOW = 120              # seconds of histogram ring for percentiles
@@ -299,6 +304,7 @@ state = {"prev_vllm": None, "ring_vllm": [], "prev_sglang": None, "ring_sglang":
          "prev_net": {}, "live": {}, "model": None, "engine": None}
 
 def poll_agent(key):
+    if not AGENTS.get(key): return None
     try: return json.loads(fetch(AGENTS[key]))
     except Exception: return None
 
@@ -348,7 +354,7 @@ def _fill_vllm(p, now, row, slot):
     row["run"] = psum(p, "vllm:num_requests_running")
     # Streams actually decoding (past their prompt) per the scheduler snapshot; a request still
     # prefilling contributes 0 generated tokens, so dividing by "running" understated per-stream
-    # decode whenever a prefill was in flight (Liam, 2026-09-08). None = snapshot stale -> UI falls back to run.
+    # decode whenever a prefill was in flight (observed 2026-09-08). None = snapshot stale -> UI falls back to run.
     sch = state.get("viz_sched")
     if sch and now - sch.get("ts", 0) < 5 and isinstance(sch.get("reqs"), list):
         row["dec"] = sum(1 for q in sch["reqs"] if (q.get("prompt") or 0) > 0 and (q.get("computed") or 0) >= q["prompt"])
@@ -522,6 +528,7 @@ def tick():
             row[f"{key}_power"] = d["gpu"]["power"]; row[f"{key}_mem"] = d["mem"]["used_gib"]
             row[f"{key}_cpu"] = d["cpu_pct"]; row[f"{key}_net"] = net_rate(key, d)
     state["live"] = {"ts": now, "engine_up": engine_up, "model": state["model"], "kv_total_tokens": kv_total_tokens(),
+                     "node_labels": NODE_LABELS, "proc_cap_mib": PROC_CAP_MIB,
                      "engine": state["engine"], "row": row, "nodes": nodes,
                      "boot": None if engine_up else boot_progress()}
     return now, row
