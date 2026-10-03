@@ -16,12 +16,20 @@ from urllib.parse import urlparse, parse_qs
 
 DB_PATH = os.environ.get("SPARK_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.db"))
 VLLM = "http://localhost:8000/metrics"
-# Where the vLLM head runs. Empty GLM53_HEAD_SSH (default) = this node: local docker, metrics on localhost.
+# Where the vLLM head runs. Empty SPARK_HEAD_SSH (default) = this node: local docker, metrics on localhost.
+# (Every SPARK_HEAD_* variable also accepts its older GLM53_HEAD_* name.)
 # Set it to user@<head fabric IP> when the head is the other node: the head container is then reached through
 # docker's ssh transport (one multiplexed connection), metrics over VLLM_METRICS_URL, the boot phase file over
-# ssh, and the engine's viz UDP must be pointed at this node (GLM53_VIZ_UDP in the head's .env).
-HEAD_SSH = os.environ.get("GLM53_HEAD_SSH", "")
-HEAD_KIT = os.environ.get("GLM53_HEAD_KIT", os.path.expanduser("~/glm53/exl3-kit"))
+# ssh, and the engine's viz UDP must be pointed at this node (MIMO26_VIZ_UDP / GLM53_VIZ_UDP in the head's .env).
+_env = lambda k, d="": os.environ.get("SPARK_" + k, os.environ.get("GLM53_" + k, d))
+HEAD_SSH = _env("HEAD_SSH")
+HEAD_KIT = _env("HEAD_KIT", os.path.expanduser("~/mimo26/kit"))
+# Serving kits that can own the head, as "container:kit_dir" pairs (SPARK_HEAD_KITS). The first pair whose
+# container is running wins (falls back to the first pair that exists at all); re-checked every 15 s, so the
+# boot bar / KV pool / logs follow whichever kit is booting without a collector restart.
+_DEFAULT_HEAD_CTN = "mimo26-head"
+KITS = [tuple(k.split(":", 1)) for k in _env("HEAD_KITS").split(",") if ":" in k] \
+    or [(_DEFAULT_HEAD_CTN, HEAD_KIT)]
 DOCKER = ["docker", "-H", f"ssh://{HEAD_SSH}"] if HEAD_SSH else ["docker"]
 SGLANG = os.environ.get("VLLM_METRICS_URL", "http://localhost:8888/metrics")
 # Node agents (agent.py on :9101): "h" is the node this collector runs on, "w" the other node.
@@ -41,8 +49,36 @@ COLS = ["gen","pp","accpct","draftrate","tau","kv","pfx",
         "h_gpu","h_temp","h_power","h_mem","h_cpu","h_net",
         "w_gpu","w_temp","w_power","w_mem","w_cpu","w_net"]
 
-# ~2 x active params for glm-5.3-flash (derivation at the tflops fallback below)
-_EST_FLOPS_PER_TOKEN = 33.4e9
+# Per-model numbers the page and dash_server need (served model name prefix -> profile), exposed as /live "profile".
+#   flops_per_token : ~2 x active params, for the TF/s fallback (vLLM's estimator does not know these archs)
+#   page_tokens     : tokens per KV page of the attention group, for the pool map
+#   bw              : per-rank memory traffic per engine step for the reactor gauge:
+#                     distinct routed experts x expert_gb x moe_layers + fixed_gb (dense weights, drafter, lm_head)
+#                     + KV reads (context tokens x kv_bytes_per_tok + per-request swa bytes), or kv_gb_per_run
+MODEL_PROFILES = {
+    # MiMo-V2.6-Flash (TP=2, NVFP4 KV): active ~14.8B = 48 x attention ~90M + 47 MoE x 8 x 3*4096*2048 + dense layer 0
+    # (3*4096*16384) + lm_head 152576*4096. Expert MXFP4 (4.25 bit) 13.4 MB -> 6.68 MB per rank. Fixed per rank per step:
+    # attention fp8 qkv + bf16 o_proj 3.0 GB, dense MLP 0.1, routers 0.1, lm_head 0.63, DFlash drafter (bf16 5 layers,
+    # 2.9 GB) 1.47 + its lm_head pass 0.63 = ~5.9 GB. KV: 9 global layers x 2 kv heads/rank x 180 B = 3,240 B per
+    # context token; 39 sliding-window layers x 128 tokens x 4 heads x 180 B = 3.6 MB per request.
+    # With MTP instead of DFlash the drafter's ~2.1 GB/rank/step (5 bf16 layers + its lm_head pass) becomes one MTP
+    # layer (~0.3 GB/rank incl. its routed experts at low batch): "fixed_gb_mtp".
+    "mimo": {"name": "mimo-v2.6-flash", "flops_per_token": 29.6e9, "page_tokens": 64, "fixed_gb_mtp": 4.1,
+             "bw": {"experts": 256, "topk": 8, "moe_layers": 47, "expert_gb": 0.00668, "fixed_gb": 5.9,
+                    "kv_bytes_per_tok": 3240, "swa_bytes_per_req": 3.6e6, "kv_gb_per_run": 0.0, "peak_gb_s": 273}},
+    # GLM-5.3-Flash EXL3 (retired 2026-09-22): derivation at the tflops fallback below
+    "glm": {"name": "glm-5.3-flash", "flops_per_token": 33.4e9, "page_tokens": 7936,
+            "bw": {"experts": 288, "topk": 9, "moe_layers": 42, "expert_gb": 0.0063, "fixed_gb": 7.4,
+                   "kv_bytes_per_tok": 0, "swa_bytes_per_req": 0, "kv_gb_per_run": 0.067 * 33 / 8, "peak_gb_s": 273}},
+}
+
+
+def model_profile(model=None):
+    m = (model if model is not None else state.get("model")) or ""
+    for k, p in MODEL_PROFILES.items():
+        if m.startswith(k) or m == p["name"]:
+            return p
+    return MODEL_PROFILES["mimo"]
 
 # Series whose true per-bucket extremes are also returned (as <col>_mx / <col>_mn),
 # so the min/max readouts do not change when the timeframe (and thus bucket width)
@@ -127,9 +163,52 @@ import re as _re
 import subprocess as _sp
 import json as _json
 import datetime as _dt
-BOOT_STATE = HEAD_KIT + "/logs/boot-state.json"
-# (key, label, typical seconds, marker regex in the head log that ENDS the stage; None = ended by state file)
-_BOOT_STAGES = [
+_kit_cache = {"t": 0.0, "v": KITS[0]}
+
+# The head node's agent (SPARK_AGENT_W, :9101) answers container state and the kit's boot-state file locally, so the
+# collector does not poll over ssh: each ssh command is a PAM/logind session on the head, and ~80 a minute kept its
+# desktop daemons churning and leaking (bluetoothd re-registered audio profiles per session, polkitd grew ~0.6 GB/day,
+# the head ran out of headroom and the memory watchdog killed vLLM on 2026-09-29). ssh stays as the fallback.
+_AGENT_HEAD = os.environ.get("SPARK_AGENT_W", "").rsplit("/stats", 1)[0] if HEAD_SSH else ""
+
+def _agent_json(path):
+    if not _AGENT_HEAD:
+        return None
+    try:
+        with urllib.request.urlopen(_AGENT_HEAD + path, timeout=3) as r:
+            return _json.loads(r.read())
+    except Exception:
+        return None
+
+def _active_kit():
+    """(container, kit_dir) of the kit that currently owns the head."""
+    now = time.time()
+    if now - _kit_cache["t"] < 15.0:
+        return _kit_cache["v"]
+    v = _kit_cache["v"]
+    try:
+        d = _agent_json("/docker?names=" + ",".join(k[0] for k in KITS))
+        if d is not None:
+            states = {n: x.get("status") for n, x in d.items()}
+        else:
+            out = _sp.run(DOCKER + ["ps", "-a", "--format", "{{.Names}} {{.State}}"], capture_output=True, text=True, timeout=4)
+            states = dict(ln.split(None, 1) for ln in out.stdout.splitlines() if " " in ln)
+        running = [k for k in KITS if states.get(k[0]) == "running"]
+        present = [k for k in KITS if k[0] in states]
+        v = (running or present or [KITS[0]])[0]
+    except Exception:
+        pass
+    _kit_cache.update(t=now, v=v)
+    return v
+
+def head_ctn():
+    return _active_kit()[0]
+
+def boot_state_path():
+    return _active_kit()[1] + "/logs/boot-state.json"
+# (key, label, typical seconds, marker regex in the head log that ENDS the stage; None = ended by state file).
+# Per serving kit (container name -> stages): the same log markers, different labels and typical durations.
+_BOOT_STAGES_GLM = [
     ("teardown", "stopping old containers, shipping files", 20, None),
     ("patch",    "applying kit patches (both containers)",    8, _re.compile(r"launching: vllm serve")),
     ("init",     "engine init + worker join over CX7",       16, _re.compile(r"Initializing a V1 LLM engine")),
@@ -140,20 +219,52 @@ _BOOT_STAGES = [
     ("api",      "API server startup",                        10, _re.compile(r"Application startup complete")),
     ("health",   "health check + post-ready reclaim",          7, None),
 ]
-_TOTAL_TYP = float(sum(s[2] for s in _BOOT_STAGES))
+# MiMo kit, measured on boot 35 (2026-09-22, 160 s launch to healthy): container start 9 s after start.sh, patchers
+# <1 s, engine init 21 s, CX7 join + 35 s InstantTensor load 54 s, DFlash weights 11 s, compile + KV 30 s, kernel
+# warmup + graphs 30 s, API 5 s.
+_BOOT_STAGES_MIMO = [
+    ("teardown", "stopping old containers, shm cleanup, headroom check",  9, None),
+    ("patch",    "applying kit patches (overlay patchers)",                1, _re.compile(r"launching: vllm serve")),
+    ("init",     "API server + engine init",                              21, _re.compile(r"Initializing a V1 LLM engine")),
+    ("weights",  "worker join over CX7 + weights (InstantTensor)",        54, _re.compile(r"Loading weights took")),
+    ("reclaim",  "DFlash drafter weights",                                11, _re.compile(r"Loading weights took.*\n(?:.*\n)*?.*Loading weights took")),
+    ("kv",       "torch.compile + KV cache allocation (NVFP4)",           30, _re.compile(r"GPU KV cache size")),
+    ("graphs",   "kernel warmup + CUDA graph capture",                    30, _re.compile(r"Graph capturing finished")),
+    ("api",      "API server startup",                                     5, _re.compile(r"Application startup complete")),
+    ("health",   "health check",                                           9, None),
+]
+_BOOT_PROFILES = {"glm53-exl3-head": _BOOT_STAGES_GLM, "mimo26-head": _BOOT_STAGES_MIMO}
+
+
+def _boot_stages():
+    return _BOOT_PROFILES.get(head_ctn(), _BOOT_STAGES_MIMO)
 _boot_cache = {"t": 0.0, "log": "", "started": None}
 
+_cstate_cache = {"t": 0.0, "v": (None, None, None)}
+
 def _container_state():
+    """(status, started, finished) of the head container; cached 2 s (it is asked several times per tick)."""
+    now = time.time()
+    if now - _cstate_cache["t"] < 2.0:
+        return _cstate_cache["v"]
+    p = lambda s: _dt.datetime.fromisoformat(s[:26].rstrip("Z") + "+00:00").timestamp() if s and not s.startswith("0001") else None
+    v = (None, None, None)
     try:
-        out = _sp.run(DOCKER + ["inspect", "-f", "{{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
-                       "glm53-exl3-head"], capture_output=True, text=True, timeout=3)
-        if out.returncode != 0:
-            return None, None, None
-        st, started, finished = out.stdout.split()
-        p = lambda s: _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if not s.startswith("0001") else None
-        return st, p(started), p(finished)
+        d = _agent_json("/docker?names=" + head_ctn())
+        if d is not None:
+            x = d.get(head_ctn())
+            if x:
+                v = (x["status"], p(x["started"]), p(x["finished"]))
+        else:
+            out = _sp.run(DOCKER + ["inspect", "-f", "{{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
+                           head_ctn()], capture_output=True, text=True, timeout=3)
+            if out.returncode == 0:
+                st, started, finished = out.stdout.split()
+                v = (st, p(started), p(finished))
     except Exception:
-        return None, None, None
+        v = (None, None, None)
+    _cstate_cache.update(t=now, v=v)
+    return v
 
 def _head_log(started):
     """Head container log since it started, with docker's RFC3339 timestamps (cached 2 s)."""
@@ -161,7 +272,7 @@ def _head_log(started):
     if now - _boot_cache["t"] < 2.0 and _boot_cache["started"] == started:
         return _boot_cache["log"]
     try:
-        out = _sp.run(DOCKER + ["logs", "--timestamps", "glm53-exl3-head"], capture_output=True, text=True, timeout=8)
+        out = _sp.run(DOCKER + ["logs", "--timestamps", head_ctn()], capture_output=True, text=True, timeout=8)
         log = (out.stdout or "") + (out.stderr or "")
     except Exception:
         log = ""
@@ -184,13 +295,16 @@ def _read_state():
         return _state_cache["v"]
     v = None
     try:
-        if HEAD_SSH:
+        a = _agent_json("/bootstate?path=" + boot_state_path()) if HEAD_SSH else None
+        if a is not None:
+            v = a
+        elif HEAD_SSH:
             r = _sp.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
-                         "-o", "ControlPath=/tmp/glm53-mux-%C", "-o", "ControlPersist=120", HEAD_SSH, "cat", BOOT_STATE],
+                         "-o", "ControlPath=/tmp/glm53-mux-%C", "-o", "ControlPersist=120", HEAD_SSH, "cat", boot_state_path()],
                         capture_output=True, text=True, timeout=5)
             v = _json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
         else:
-            with open(BOOT_STATE) as f:
+            with open(boot_state_path()) as f:
                 v = _json.load(f)
     except Exception:
         v = None
@@ -241,12 +355,12 @@ def boot_progress():
                 ends["api"] = ts
     if phase in ("healthy", "ready") and ptime >= (started or 0):
         ends["api"] = min(ends.get("api", ptime), ptime)
-        if phase == "ready":
-            ends["health"] = ptime
+        ends["health"] = ptime             # "healthy" = API answering; post-ready reclaim is not part of the boot
     # Walk the stages in order; the first one without an end is the current stage.
     stages, done_typ, cur = [], 0.0, None
     prev_end = t0
-    for key, label, typ, _rx in _BOOT_STAGES:
+    boot_stages = _boot_stages()
+    for key, label, typ, _rx in boot_stages:
         end = ends.get(key)
         if end is not None and cur is None:
             stages.append({"key": key, "label": label, "typ_s": typ, "state": "done", "took_s": round(max(0.0, end - prev_end))})
@@ -260,7 +374,7 @@ def boot_progress():
         return None
     key, label, typ, cstart = cur
     in_stage = max(0.0, now - cstart)
-    pct = (done_typ + min(in_stage, typ)) / _TOTAL_TYP * 100.0
+    pct = (done_typ + min(in_stage, typ)) / float(sum(s[2] for s in boot_stages)) * 100.0
     remaining = sum(s["typ_s"] for s in stages if s["state"] == "pending") + max(0.0, typ - in_stage)
     idx = next(i for i, s in enumerate(stages) if s["state"] == "current")
     late = in_stage > 1.5 * typ
@@ -275,6 +389,38 @@ def boot_progress():
 # container start; the scheduler snapshot's pool_tokens is attention-page tokens and overstates it ~2.4x.
 _kv_total_cache = {"started": None, "tokens": None, "t": 0.0}
 
+def _effective_profile(drafter):
+    """Model profile with the bandwidth model's fixed weights matched to the running draft method."""
+    prof = model_profile()
+    if drafter and drafter.get("method") == "mtp" and prof.get("fixed_gb_mtp"):
+        prof = {**prof, "bw": {**prof["bw"], "fixed_gb": prof["fixed_gb_mtp"]}}
+    return prof
+
+
+_drafter_cache = {"started": None, "v": None}
+
+def drafter_info():
+    """Speculative-decoding method of the running engine, from its log (cached per container start):
+    {"method": "mtp"|"dflash"|..., "arch": draft architecture, "k": draft tokens per step}."""
+    st, started, _fin = _container_state()
+    c = _drafter_cache
+    if c["started"] == started and c["v"] is not None:
+        return c["v"]
+    v = None
+    if st == "running":
+        try:
+            out = _sp.run(DOCKER + ["logs", head_ctn()], capture_output=True, text=True, timeout=8)
+            log = out.stdout + out.stderr
+            archs = _re.findall(r"Resolved architecture: (\w+)", log)
+            m = _re.search(r"'speculative_config': \{'method': '(\w+)'.*?'num_speculative_tokens': (\d+)", log)
+            if m:
+                v = {"method": m.group(1), "k": int(m.group(2)), "arch": archs[1] if len(archs) > 1 else None}
+        except Exception:
+            v = None
+    c["started"], c["v"] = started, v
+    return v
+
+
 def kv_total_tokens():
     st, started, _fin = _container_state()
     now = time.time()
@@ -285,7 +431,7 @@ def kv_total_tokens():
     tokens = None
     if st == "running":
         try:
-            out = _sp.run(DOCKER + ["logs", "glm53-exl3-head"], capture_output=True, text=True, timeout=8)
+            out = _sp.run(DOCKER + ["logs", head_ctn()], capture_output=True, text=True, timeout=8)
             for ln in reversed((out.stdout + out.stderr).splitlines()):
                 m = _re.search(r"GPU KV cache size:\s*([\d,]+)\s*tokens", ln)
                 if m:
@@ -344,7 +490,7 @@ def _fill_vllm(p, now, row, slot):
         "flops": psum(p, "vllm:estimated_flops_per_gpu_total"),
         # per-step context (prefill) tokens from the glm53 logger patch: counted
         # every engine step, including pure-prefill steps that produce no output
-        "ctx_live": psum(p, "vllm:glm53_ctx_tokens_total"),
+        "ctx_live": psum(p, "vllm:glm53_ctx_tokens_total") or state.get("viz_prefill_total", 0.0),
         "t": now,
     }
     kv = pget(p, "vllm:kv_cache_usage_perc")
@@ -398,7 +544,16 @@ def _fill_vllm(p, now, row, slot):
         dPrompt = max(0.0, cur["pp"] - pv["pp"])
         dCtx = cur.get("ctx_live", 0) - pv.get("ctx_live", 0)
         if cur.get("ctx_live", 0) > 0:
-            row["pp"] = max(dCtx, 0.0) / dt        # live: every step counted, no output needed
+            # live: every step counted, no output needed. Averaged over ~12 s: at long contexts one 4K prefill chunk
+            # takes several seconds, so a single 2.5 s tick alternates between 0 and a spike.
+            win = state.setdefault("ctx_win_" + slot, [])
+            if win and cur["ctx_live"] < win[-1][1]:
+                win.clear()                        # counter reset (engine or collector restart)
+            win.append((now, cur["ctx_live"]))
+            while len(win) > 2 and now - win[0][0] > 12.0:
+                win.pop(0)
+            span = now - win[0][0]
+            row["pp"] = (win[-1][1] - win[0][1]) / span if span > 0 else max(dCtx, 0.0) / dt
         else:
             row["pp"] = max(pp_live, 0.0) if dIt > 0 else dPrompt / dt
         dC = max(0.0, cur.get("iter_cnt", 0) - pv.get("iter_cnt", 0))
@@ -416,7 +571,7 @@ def _fill_vllm(p, now, row, slot):
         # 634M. Cluster-total FLOPs, not per-GPU.
         dF = max(0.0, cur.get("flops", 0) - pv.get("flops", 0))
         row["tflops"] = dF / dt / 1e12 if dF > 0 else (
-            _EST_FLOPS_PER_TOKEN * (dIt / dt) / 1e12 if dIt > 0 else None)
+            model_profile()["flops_per_token"] * (dIt / dt) / 1e12 if dIt > 0 else None)
         row["accpct"] = 100 * dA / dD if dD > 0 else None
         row["draftrate"] = max(0.0, dD) / dt
         row["tau"] = 1 + dA / dN if dN > 0 else None
@@ -530,6 +685,8 @@ def tick():
     state["live"] = {"ts": now, "engine_up": engine_up, "model": state["model"], "kv_total_tokens": kv_total_tokens(),
                      "node_labels": NODE_LABELS, "proc_cap_mib": PROC_CAP_MIB,
                      "engine": state["engine"], "row": row, "nodes": nodes,
+                     "profile": _effective_profile(drafter_info() if engine_up else None), "kit": _active_kit()[1],
+                     "drafter": drafter_info() if engine_up else None,
                      "boot": None if engine_up else boot_progress()}
     return now, row
 
@@ -551,9 +708,201 @@ def loop():
         time.sleep(max(0.2, TICK - (time.time() - t0)))
 
 # ---------------- API ----------------
+def _prefill_counter(f):
+    """Live prefill tokens for the throughput panel. The MiMo scheduler hook sends `prefill_total` (prompt tokens
+    computed, counted every step); without it, derive the same from how far each running request's prompt progress
+    moved since its previous snapshot (a request's first snapshot is not counted: it includes prefix-cache hits)."""
+    if "prefill_total" in f:
+        state["viz_prefill_total"] = float(f["prefill_total"]) + state.get("viz_prefill_offset", 0.0)
+        return
+    last = state.setdefault("pf_last", {})
+    total = state.get("viz_prefill_total", 0.0)
+    seen = {}
+    for q in f.get("reqs") or []:
+        done = min(q.get("computed") or 0, q.get("prompt") or 0)
+        prev = last.get(q.get("id"))
+        if prev is not None and done > prev:
+            total += done - prev
+        seen[q.get("id")] = done
+    state["pf_last"] = seen
+    state["viz_prefill_total"] = total
+    state["viz_prefill_offset"] = total          # keeps the counter monotonic if the engine counter takes over
+
+
+PROXY_ATTR_URL = os.environ.get("SPARK_PROXY_ATTR_URL", "http://127.0.0.1:8890/_proxy/attribution")
+
+
+def attribution_poller():
+    """Who sent each request: the optional API proxy on this node (dashboard/api-proxy.py, :8888 -> head) lists recent
+    generation requests with the client's Tailscale user / machine or LAN name (never content). Matched to the
+    scheduler's requests in attribute_reqs()."""
+    while True:
+        try:
+            with urllib.request.urlopen(f"{PROXY_ATTR_URL}?since={time.time() - 3600:.0f}", timeout=3) as r:
+                d = json.load(r)
+            state["attr_records"] = d.get("records") or []
+            state["attr_ok"] = time.time()
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+
+def _who_label(w):
+    w = w or {}
+    user, machine, src = w.get("user"), w.get("machine"), w.get("source")
+    if src == "tailscale":
+        first = (user or "?").split("@")[0].split()[0]
+        return f"{first}@{machine}" if machine else first
+    if src == "lan":
+        return f"{machine} ({user})" if machine and user else (machine or user)
+    return None
+
+
+def attribute_reqs(sch):
+    """Attach `who` to each scheduler request: the proxy record forwarded closest before the request reached vLLM
+    (arrival = frame ts - age; vLLM stamps arrival when its API server receives the request: 0.3 s after the
+    proxy forwarded an 839K-token image request, so the window is tight and requests that bypass the proxy cannot
+    steal a proxied request's record). One
+    HTTP request can become several engine requests (multi-prompt completions), up to the record's `n`.
+    Assignments stick per request id; requests that came in through the old socat forwarder stay unattributed."""
+    recs = state.get("attr_records") or []
+    amap = state.setdefault("attr_map", {})
+    used = state.setdefault("attr_used", {})
+    now = time.time()
+    out = []
+    for q in sch.get("reqs") or []:
+        key = q.get("id")
+        hit = amap.get(key)
+        if hit is None and recs:
+            arrival = float(sch.get("ts") or now) - float(q.get("age") or 0)
+            best, best_d = None, None
+            for r in recs:
+                t = r.get("t_fwd") or r.get("t_recv")
+                if t is None or used.get(r["rid"], 0) >= (r.get("n") or 1):
+                    continue
+                d = arrival - t
+                if d < -1.5 or d > 5.0:
+                    continue
+                if r.get("t_end") and r["t_end"] < arrival - 1.0:
+                    continue
+                if best_d is None or abs(d) < abs(best_d):
+                    best, best_d = r, d
+            if best is not None:
+                used[best["rid"]] = used.get(best["rid"], 0) + 1
+                hit = amap[key] = {"who": best.get("who") or {}, "ip": best.get("ip"), "dt": round(best_d, 2), "seen": now}
+        if hit:
+            hit["seen"] = now
+            w = hit["who"]
+            q = dict(q, who={"label": _who_label(w) or hit.get("ip"), "user": w.get("user"), "login": w.get("login"),
+                             "machine": w.get("machine"), "source": w.get("source") or "ip"})
+        try:
+            stats = req_stats(key, now)
+        except Exception:
+            stats = None
+        if stats:
+            q = dict(q, stats=stats)
+        out.append(q)
+    if len(amap) > 500:
+        for k in [k for k, v in amap.items() if now - v.get("seen", 0) > 900]:
+            del amap[k]
+        live = {r["rid"] for r in recs}
+        for k in [k for k in used if k not in live]:
+            del used[k]
+    return dict(sch, reqs=out, attribution=bool(state.get("attr_ok") and now - state["attr_ok"] < 10))
+
+
+REQ_T0 = time.time()   # requests that arrived before this collector started have no exact TTFT / queue time
+
+
+def _req_stats_update(f):
+    """Per-request timeline from the scheduler snapshots (counts only): arrival, first time seen running, first
+    generated token, and a short (ts, computed, total) history for live prefill / generation rates."""
+    import collections as _c
+    ts = float(f.get("ts") or time.time())
+    rs = state.setdefault("rstats", {})
+    for q in f.get("reqs") or []:
+        key = q.get("id")
+        if not key:
+            continue
+        prompt, computed, total = int(q.get("prompt") or 0), int(q.get("computed") or 0), int(q.get("total") or 0)
+        st = rs.get(key)
+        if st is None:
+            arrival = ts - float(q.get("age") or 0)
+            fresh = arrival >= REQ_T0
+            st = rs[key] = {"arrival": arrival, "first_seen": ts, "fresh": fresh, "prompt": prompt,
+                            "cached": None, "first_tok": None, "tok_total0": None, "tok_exact": total <= prompt,   # prefill->decode seen = exact TTFT
+                            "tok_upper": fresh and total > prompt,   # prefill done between two frames: first sight bounds TTFT
+                            "hist": _c.deque(maxlen=400), "acc": _c.deque(maxlen=64), "acc_steps": set()}
+        st["last_seen"] = ts
+        st["hist"].append((ts, computed, total))
+        if q.get("cached") is not None:          # exact prefix-cache hit from vLLM (kit hook >= 2026-09-24)
+            st["cached"] = int(q["cached"])
+        if st["first_tok"] is None and total > prompt:
+            st["first_tok"], st["tok_total0"] = ts, total
+    if len(rs) > 64:
+        for k in [k for k, v in rs.items() if ts - v.get("last_seen", 0) > 600]:
+            del rs[k]
+
+
+def _req_acc_update(a3):
+    """DFlash tokens emitted per step for each request (1 + accepted drafts), from the activation frames."""
+    rs = state.get("rstats") or {}
+    step = a3.get("step")
+    for key, n in a3.get("acc") or []:
+        st = rs.get(key)
+        if st is not None and (step is None or step not in st["acc_steps"]):
+            st["acc"].append(int(n))
+            if step is not None:
+                st["acc_steps"].add(step)
+                if len(st["acc_steps"]) > 256:
+                    st["acc_steps"] = set(sorted(st["acc_steps"])[-128:])
+
+
+def _rate(hist, idx, window=20.0):
+    """tokens/s of hist[*][idx] over the last `window` seconds (None without two points)."""
+    if len(hist) < 2:
+        return None
+    t1, v1 = hist[-1][0], hist[-1][idx]
+    t0, v0 = hist[0][0], hist[0][idx]
+    for t, *vals in reversed(hist):
+        if t1 - t >= window:
+            t0, v0 = t, vals[idx - 1]
+            break
+    return (v1 - v0) / (t1 - t0) if t1 - t0 >= 0.5 else None
+
+
+def req_stats(key, now):
+    st = (state.get("rstats") or {}).get(key)
+    if not st:
+        return None
+    h = list(st["hist"])          # snapshot: the UDP thread keeps appending
+    acc = list(st["acc"])
+    last = h[-1] if h else (now, 0, 0)
+    prompt, computed, total = st["prompt"], last[1], last[2]
+    prefilling = computed < prompt
+    out = {"phase": "prefill" if prefilling else "decode",
+           "prefill_tps": _rate(h, 1) if prefilling else None,
+           "gen_tps": None if prefilling else _rate(h, 2),
+           "generated": max(0, total - prompt),
+           "queue_s": round(st["first_seen"] - st["arrival"], 2) if st["fresh"] else None,
+           "cached": st["cached"],
+           "ttft_s": round(st["first_tok"] - st["arrival"], 2) if (st["first_tok"] and (st["tok_exact"] or st["tok_upper"])) else None,
+           "ttft_upper": bool(st.get("tok_upper")),
+           "tau": round(sum(acc[-32:]) / len(acc[-32:]), 2) if acc else None}
+    if st["first_tok"] and not prefilling and last[0] - st["first_tok"] >= 1.0:
+        out["gen_tps_avg"] = round((total - st["tok_total0"]) / (last[0] - st["first_tok"]), 2)
+    if st["fresh"] and st["first_tok"] and st["tok_exact"]:
+        pf_t = st["first_tok"] - st["first_seen"]
+        out["prefill_tps_avg"] = round((prompt - (st["cached"] or 0)) / pf_t, 1) if pf_t >= 0.5 else None
+    for k in ("prefill_tps", "gen_tps"):
+        if out[k] is not None:
+            out[k] = round(out[k], 2)
+    return out
+
+
 def viz_udp_listener(port=9103):
     """Receive live-activation frames ('act') and scheduler snapshots ('sched')
-    sent by the engine hooks (glm53_viz_runtime / patch_viz_hooks) as UDP JSON."""
+    sent by the engine hooks (mimo26_viz_runtime / glm53_viz_runtime + the kit's patch_viz_hooks) as UDP JSON."""
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
@@ -564,9 +913,15 @@ def viz_udp_listener(port=9103):
             f = json.loads(data.decode())
             k = f.get("kind")
             if k == "act": state["viz_act"] = f
-            elif k == "sched": state["viz_sched"] = f
+            elif k == "sched":
+                state["viz_sched"] = f
+                _prefill_counter(f)
+                _req_stats_update(f)
             elif k == "viz_status": state["viz_status"] = f
-            elif k == "act3d": state["viz_act3d"] = f
+            elif k == "act3d":
+                state["viz_act3d"] = f
+                _req_acc_update(f)
+            elif k == "act3h": state["viz_act3h"] = f
         except Exception:
             pass
 
@@ -590,10 +945,11 @@ class H(BaseHTTPRequestHandler):
             # snapshot (from the EngineCore), both arriving over UDP :9103.
             now = time.time()
             act, sch = state.get("viz_act"), state.get("viz_sched")
-            vs = state.get("viz_status"); a3 = state.get("viz_act3d")
+            vs = state.get("viz_status"); a3 = state.get("viz_act3d"); ah = state.get("viz_act3h")
             self._send({"act": act, "act_age": (now - act["ts"]) if act else None,
                         "act3d": a3, "act3d_age": (now - a3["ts"]) if a3 else None,
-                        "sched": sch, "sched_age": (now - sch["ts"]) if sch else None,
+                        "act3h": ah, "act3h_age": (now - ah["ts"]) if ah else None,
+                        "sched": attribute_reqs(sch) if sch else None, "sched_age": (now - sch["ts"]) if sch else None,
                         "status": vs, "status_age": (now - vs["ts"]) if vs else None})
             return
         if u.path == "/totals":
@@ -662,4 +1018,5 @@ if __name__ == "__main__":
     init_db()
     threading.Thread(target=loop, daemon=True).start()
     threading.Thread(target=viz_udp_listener, daemon=True, name="viz-udp").start()
+    threading.Thread(target=attribution_poller, daemon=True, name="attribution").start()
     ThreadingHTTPServer(("0.0.0.0", 9102), H).serve_forever()

@@ -1,0 +1,35 @@
+# Optional: who-sent-each-request attribution for the dashboard. Template: fill in @USER@, @DIR@ (this repo's
+# dashboard directory), @PYTHON@ (a python with starlette, httpx, uvicorn) and @UPSTREAM@ (http://<head fabric IP>:8888).
+# Run it on the node clients connect to (next to host-setup/glm53-api-forward.service). New connections to :8888 go to
+# the proxy once it answers; the redirect is removed whenever it stops, so clients fall back to the socat forwarder.
+# Optional LAN names: @DIR@/lan_names.json = {"<ip>": {"user": "...", "machine": "..."}}.
+[Unit]
+Description=Attribution proxy in front of the GLM API (:8888 -> head): records each request's Tailscale user / LAN machine for the dashboard
+After=network-online.target glm53-api-forward.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=API_PROXY_PORT=8890
+Environment=API_PROXY_UPSTREAM=@UPSTREAM@
+ExecStart=@PYTHON@ @DIR@/api-proxy.py
+ExecStartPost=+/bin/sh -c 'for i in $(seq 1 50); do curl -s -m 1 -o /dev/null http://127.0.0.1:8890/_proxy/health && break; sleep 0.2; done; \
+  iptables -t nat -C PREROUTING -p tcp --dport 8888 -m addrtype --dst-type LOCAL -m comment --comment api-proxy -j REDIRECT --to-ports 8890 2>/dev/null || \
+  iptables -t nat -I PREROUTING 1 -p tcp --dport 8888 -m addrtype --dst-type LOCAL -m comment --comment api-proxy -j REDIRECT --to-ports 8890; \
+  iptables -t nat -C OUTPUT -o lo -p tcp --dport 8888 -m comment --comment api-proxy -j REDIRECT --to-ports 8890 2>/dev/null || \
+  iptables -t nat -I OUTPUT 1 -o lo -p tcp --dport 8888 -m comment --comment api-proxy -j REDIRECT --to-ports 8890'
+ExecStopPost=+/bin/sh -c 'while iptables -t nat -D PREROUTING -p tcp --dport 8888 -m addrtype --dst-type LOCAL -m comment --comment api-proxy -j REDIRECT --to-ports 8890 2>/dev/null; do :; done; \
+  while iptables -t nat -D OUTPUT -o lo -p tcp --dport 8888 -m comment --comment api-proxy -j REDIRECT --to-ports 8890 2>/dev/null; do :; done'
+MemoryHigh=640M
+MemoryMax=768M
+MemorySwapMax=0
+CPUQuota=200%
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

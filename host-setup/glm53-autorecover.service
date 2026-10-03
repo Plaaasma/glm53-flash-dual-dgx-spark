@@ -1,0 +1,19 @@
+# Template: setup-node.sh worker --autorecover user@<head fabric IP> fills in User, the kit path and the head.
+[Unit]
+Description=GLM-5.3 server auto-recovery: restart vLLM only when a rank has died or the engine is hung
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+Environment=AUTORECOVER_HEAD_SSH=@HEAD_SSH@
+ExecStart=@KIT@/scripts/autorecover.sh
+Restart=always
+RestartSec=10
+Nice=5
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

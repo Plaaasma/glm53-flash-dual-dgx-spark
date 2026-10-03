@@ -97,7 +97,10 @@ body{
 .meter.mid .fl{background:var(--gold)}
 .nfoot{font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost);margin-top:6px}
 .nfoot.alert{color:#ff6b6b;font-weight:700}
-.kvlegend{position:absolute;left:10px;bottom:10px;z-index:3;font:600 11px 'IBM Plex Mono',monospace;color:#dfe6ee;background:rgba(11,13,16,.82);border:1px solid var(--line);padding:6px 8px;pointer-events:none;max-width:70%}
+.kvlegend{position:absolute;left:10px;bottom:10px;z-index:3;font:600 11px 'IBM Plex Mono',monospace;color:#dfe6ee;background:rgba(11,13,16,.82);border:1px solid var(--line);padding:6px 8px;pointer-events:none;max-width:92%;max-height:calc(100% - 64px);overflow-y:auto}
+.kvlegend.many{pointer-events:auto;font-size:10px;overflow-x:hidden}
+.kvlegend.many .bar{display:none}
+.kvlegend .row span:nth-child(2){overflow:hidden;text-overflow:ellipsis}
 .kvlegend .row{display:flex;align-items:center;gap:7px;margin:2px 0;white-space:nowrap}
 .kvlegend .sw{width:8px;height:8px;flex:none}
 .kvlegend .bar{width:64px;height:5px;background:#1b2028;flex:none;overflow:hidden}
@@ -169,16 +172,23 @@ body.ambient #main{padding:14px}
 body.ambient #agrid{grid-template-columns:2fr 1fr;grid-auto-rows:minmax(0,1fr);height:calc(100vh - 70px)}
 body.ambient .apanel{display:flex;flex-direction:column}
 body.ambient .apanel canvas{flex:1;height:auto!important;min-height:0}
-#agrid3d{display:grid;grid-template-columns:2fr 1fr 1fr;grid-template-rows:330px 300px;gap:14px}
+#agrid3d{display:grid;grid-template-columns:2fr 1fr 1fr;grid-template-rows:330px 300px 400px;gap:14px}
 #agrid3d .cortex{grid-row:1 / 3}
+#agrid3d .reqs3{grid-column:1 / -1}
+.rq3key{position:absolute;left:10px;bottom:8px;z-index:3;font:500 10.5px 'IBM Plex Mono',monospace;color:var(--ghost);pointer-events:none}
+.rq3key i{display:inline-block;width:9px;height:9px;margin:0 4px 0 8px;vertical-align:-1px}
+.rq3list{position:absolute;right:10px;top:40px;z-index:3;font:500 10.5px 'IBM Plex Mono',monospace;color:#dfe6ee;background:rgba(11,13,16,.84);border:1px solid var(--line);padding:6px 8px;max-width:50%;max-height:calc(100% - 84px);overflow:auto}
+.rq3list .row{display:flex;align-items:center;gap:7px;margin:2px 0;white-space:nowrap}
+.rq3list .sw{width:8px;height:8px;flex:none}
+.rq3list .tx{overflow:hidden;text-overflow:ellipsis}
 #agrid3d canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
 #agrid3d .apanel{display:flex;flex-direction:column;min-height:0}
 #agrid3d .apanel canvas{flex:1;min-height:0}
-@media(max-width:1100px){#agrid3d{grid-template-columns:1fr 1fr;grid-template-rows:320px 260px 260px}#agrid3d .cortex{grid-column:1 / -1;grid-row:1}}
+@media(max-width:1100px){#agrid3d{grid-template-columns:1fr 1fr;grid-template-rows:320px 260px 260px 380px}#agrid3d .cortex{grid-column:1 / -1;grid-row:1}}
 #agrid[hidden],#agrid3d[hidden]{display:none!important}
 #gaugestrip{margin-top:14px}
 #gaugestrip canvas{height:150px}
-body.ambient #agrid3d{height:calc(100vh - 250px);grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+body.ambient #agrid3d{height:calc(100vh - 250px);grid-template-rows:minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)}
 body.ambient #gaugestrip .apanel{display:block}
 body.ambient #gaugestrip canvas{height:120px!important;flex:none}
 #ambient .ah .mode{background:transparent;border:1px solid var(--line2);color:var(--ghost);font:600 10.5px 'IBM Plex Mono',monospace;padding:5px 10px;cursor:pointer;border-radius:3px;margin-left:auto}
@@ -247,6 +257,7 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
       <div class="sv" id="t_saved">—</div>
       <div class="sk">saved vs
         <select id="apiSel">
+          <option value="mimo26">MiMo V2.6 Flash</option>
           <option value="glm53">GLM 5.3 Flash</option>
           <option value="terra">GPT 5.6 Terra</option>
           <option value="opus">Claude Opus 4.8</option>
@@ -265,18 +276,19 @@ body.ambient #gaugestrip canvas{height:120px!important;flex:none}
       <ol class="stages" id="b_stages"></ol>
     </div>
     <div id="ambient">
-      <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine hooks</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
+      <div class="ah"><h3>live activations</h3><span class="st" id="viz_state">waiting for engine telemetry</span><button class="mode on" id="mode_btn">3D</button><button id="ambient_btn">AMBIENT ▸</button></div>
       <div id="agrid3d">
-        <div class="apanel cortex"><div class="ph"><h4>cortex — glm-5.3-flash: tokenizer → 45 layers (34 kda · 11 dsa · 42 moe × 288) → sampler</h4><span class="sub" id="cx_sub">drag to orbit · right-drag to pan · wheel to zoom · double-click to reset</span></div><canvas id="cv3_cortex"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>attention volume — layer × token × context</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
+        <div class="apanel cortex"><div class="ph"><h4 id="cx_title">—</h4><span class="sub" id="cx_sub">drag to orbit · right-drag to pan · wheel to zoom · double-click to reset</span></div><canvas id="cv3_cortex"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="av_title">—</h4><span class="sub" id="av_sub">—</span></div><canvas id="cv3_attn"></canvas></div>
         <div class="apanel"><div class="ph"><h4>activation space — final hidden state → 3-d</h4><span class="sub" id="as_sub">—</span></div><canvas id="cv3_space"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>residual terrain — layer × time × magnitude</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="rt_title">—</h4><span class="sub" id="rt_sub">—</span></div><canvas id="cv3_terrain"></canvas></div>
         <div class="apanel"><div class="ph"><h4 id="kv3_title">kv pool — requests × blocks</h4><span class="sub" id="kv3_sub">—</span></div><canvas id="cv3_kv"></canvas><div id="kv3_legend" class="kvlegend" hidden></div></div>
+        <div class="apanel reqs3"><div class="ph"><h4>requests — input ◂ prefill · first token · generation ▸ output</h4><span class="sub" id="rq3_sub">—</span></div><canvas id="cv3_reqs"></canvas><div id="rq3_list" class="rq3list" hidden></div><div class="rq3key">input bar: <i style="background:#ffc24b"></i>cached <i style="background:#52b7ff"></i>prefilled <i style="background:#2a323d"></i>pending · output bar: <i style="background:#c8f542"></i>generated · pillar = live tok/s · ring = tokens per step (DFlash) · lengths log-scaled</div></div>
       </div>
       <div id="agrid" hidden>
-        <div class="apanel"><div class="ph"><h4>expert routing — 42 layers × 288 experts</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>attention scan — where each MLA layer reads</h4><span class="sub" id="scan_sub">context →</span></div><canvas id="cv_scan"></canvas></div>
-        <div class="apanel"><div class="ph"><h4>residual stream — per-layer magnitude</h4><span class="sub" id="ribbon_sub">—</span></div><canvas id="cv_ribbon"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="brain_title">—</h4><span class="sub" id="brain_sub">—</span></div><canvas id="cv_brain"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="scan_title">—</h4><span class="sub" id="scan_sub">—</span></div><canvas id="cv_scan"></canvas></div>
+        <div class="apanel"><div class="ph"><h4 id="ribbon_title">—</h4><span class="sub" id="ribbon_sub">—</span></div><canvas id="cv_ribbon"></canvas></div>
         <div class="apanel"><div class="ph"><h4 id="kv_title">kv pool</h4><span class="sub" id="kv_sub">—</span></div><canvas id="cv_kv"></canvas></div>
       </div>
       <div id="gaugestrip"><div class="apanel"><div class="ph"><h4>reactor — bandwidth · power · thermals · clocks</h4><span class="sub" id="gauge_sub">—</span></div><canvas id="cv_gauge"></canvas></div></div>
@@ -390,6 +402,7 @@ async function fetchLive(){
     const r = await fetch(`${API}/live`, {cache:"no-store"});
     LIVE = await r.json();
   }catch(e){ LIVE = null; }
+  pickModel();
   renderRail(); drawBarsPanel();
 }
 async function fetchTotals(){
@@ -399,7 +412,7 @@ async function fetchTotals(){
 
 /* ---------------- rail ---------------- */
 const PRICES = {
-  glm53:{in:0.15, out:0.50}, terra:{in:2.00, out:12.00}, opus:{in:5.00, out:25.00},
+  mimo26:{in:0.14, out:0.28}, glm53:{in:0.15, out:0.50}, terra:{in:2.00, out:12.00}, opus:{in:5.00, out:25.00},
 };
 function renderSaved(){
   if (!TOTALS) return;
@@ -409,7 +422,8 @@ function renderSaved(){
   const usd = TOTALS.input_tokens/1e6*p.in + TOTALS.output_tokens/1e6*p.out;
   $("t_saved").textContent = "$" + usd.toLocaleString(undefined,{maximumFractionDigits:2});
 }
-$("apiSel").addEventListener("change", renderSaved);
+$("apiSel").addEventListener("change", () => { try { localStorage.setItem("price_pick", $("apiSel").value); } catch(e){} renderSaved(); });
+try { const pp = localStorage.getItem("price_pick"); if (pp) $("apiSel").value = pp; } catch(e){}
 
 function renderRail(){
   const d = LIVE;
@@ -429,8 +443,9 @@ function renderRail(){
     $("b_pct").textContent = boot.failed ? "failed" : (boot.pct||0)+"%";
     $("b_elapsed").textContent = boot.elapsed_s!=null ? "elapsed "+fmtS(boot.elapsed_s) : "";
     $("b_eta").textContent = boot.eta_s!=null ? (boot.late ? "this stage is running long · " : "") + "≈ "+fmtS(boot.eta_s)+" remaining" : "";
-    $("b_sub").textContent = boot.stage_key==="stopped" ? "No server container found — start it with exl3-kit/start.sh."
-      : boot.failed ? (boot.note || "start.sh reported a failed boot — see exl3-kit/logs/")
+    const kit = (d.kit || "the kit").split("/").slice(-2).join("/");
+    $("b_sub").textContent = boot.stage_key==="stopped" ? `No server container found — start it with ${kit}/start.sh.`
+      : boot.failed ? (boot.note || `start.sh reported a failed boot — see ${kit}/logs/`)
       : boot.stage_key==="teardown" ? "start.sh is tearing down the old containers and shipping the kit to the worker."
       : `stage ${boot.stage_elapsed_s!=null ? fmtS(boot.stage_elapsed_s) : "—"} of a typical ${fmtS(boot.stage_typ_s||0)} · progress is weighted by each stage's usual duration, measured over the last five boots`;
     // stage boundaries on the track + the stage list
@@ -684,30 +699,37 @@ async function fetchViz(){
   try{
     const d = await (await fetch(`${API}/viz`, {cache:"no-store"})).json();
     const st = $("viz_state");
-    if (d.act && d.act_age < 5){
+    if (d.act && d.act_age < 5 && MODEL){
       st.textContent = `live · step ${d.act.step} · ${d.act.T} tok/step · ${VIZ.fps.toFixed(0)} fps`; st.className = "st on";
       if (d.act.step !== VIZ.lastStep){ VIZ.lastStep = d.act.step; VIZ.frames++; ingestAct(d.act); }
       if (d.act3d && d.act3d.step !== VIZ.lastStep3){ VIZ.lastStep3 = d.act3d.step; ingestAct3d(d.act3d); }
+      if (MODEL === "mimo" && d.act3h && d.act3h.step !== VIZ.lastStepH){ VIZ.lastStepH = d.act3h.step; ingestAct3h(d.act3h); }
     } else {
       const s = d.status && d.status_age < 6 ? d.status : null;
-      st.textContent = s ? (s.dead ? `hooks disabled — ${s.reason}` : `hooks armed (rank ${s.rank}, ${s.n_moe} moe / ${s.n_mla} mla, step ${s.last_step}${s.meta ? ", meta " + s.meta.join("/") : ""}${s.errors ? ", " + s.errors + " errors: " + s.last_error : ""}) — waiting for frames`)
-                         : (d.act ? `stale (${d.act_age.toFixed(0)}s)` : "waiting for engine hooks (next restart)");
+      st.textContent = s ? (s.dead ? `telemetry disabled — ${s.reason}` : `telemetry armed (rank ${s.rank}, ${s.n_moe} moe / ${s.n_attn ?? s.n_mla} attention layers${s.errors ? ", " + s.errors + " errors: " + s.last_error : ""}) — idle, frames appear with the next request`)
+                         : (d.act ? `stale (${d.act_age.toFixed(0)}s)` : "waiting for engine telemetry (MIMO26_VIZ=1 in the kit's .env)");
       st.className = "st"; }
-    VIZ.sched = d.sched && d.sched_age < 5 ? d.sched : null;
+    VIZ.sched = d.sched && d.sched_age < 20 ? d.sched : null;   // one frame per engine step; steps take 10+ s under heavy long-context load
+    if (VIZ.sched && VIZ.sched.ts !== VIZ.schedTs){ VIZ.schedTs = VIZ.sched.ts; if (S3.cortex) S3.cortex.dirty = true; }
   }catch(e){}
   const el = (Date.now()-VIZ.t0)/1000; if (el > 2){ VIZ.fps = VIZ.frames/el; VIZ.frames = 0; VIZ.t0 = Date.now(); }
 }
-function ingestAct(a){
-  const L = a.n_moe, E = 288, hist = b64u16(a.routing);
+// act frame (MiMo runtime): routing histogram [n_layers][experts] u16 (row 0 = dense layer, empty), per-layer head means
+// [n_layers][heads] u8 (scaled by the layer's max), ribbon = per-layer attention-output magnitude.
+function ingestActMiMo(a){
+  const L = a.n_layers || 48, E = a.experts || MD.E, K = a.topk || MD.K, NH = a.heads || MD.H, hist = b64u16(a.routing);
   if (!VIZ.brain || VIZ.brain.length !== L*E) VIZ.brain = new Float32Array(L*E);
   const B = VIZ.brain, T = Math.max(1, a.T);
-  for (let i=0;i<L*E;i++){ const v = hist[i] / (T*9/E*4); B[i] = Math.max(B[i]*0.82, Math.min(1, v)); }   // decay + normalize
-  const S = b64u8(a.attn), LM = a.n_mla;
-  if (!VIZ.scan || VIZ.scan.length !== LM*256) VIZ.scan = new Float32Array(LM*256);
-  for (let i=0;i<LM*256;i++) VIZ.scan[i] = Math.max(VIZ.scan[i]*0.80, S[i]/255);
-  VIZ.rib.push(a.ribbon.slice(0, a.n_all)); if (VIZ.rib.length > 240) VIZ.rib.shift();
+  for (let i=0;i<L*E;i++){ const v = hist[i] / (T*K/E*4); B[i] = Math.max(B[i]*0.82, Math.min(1, v)); }   // decay + normalize
+  const hm = b64u8(a.head_means);
+  if (!VIZ.heads || VIZ.heads.length !== L*NH) VIZ.heads = new Float32Array(L*NH);
+  for (let i=0;i<L*NH;i++) VIZ.heads[i] = Math.max(VIZ.heads[i]*0.8, hm[i]/255);
+  VIZ.headMeans = hm;
+  VIZ.rib.push(a.ribbon.slice(0, L)); if (VIZ.rib.length > 240) VIZ.rib.shift();
   VIZ.act = a; for (const sc of Object.values(S3)) sc.dirty = true;
 }
+// attention-output magnitudes span ~3 decades across layers (0.1 at layer 0, ~70 at layer 47): shade on a log scale
+const logMag = (v, mx) => Math.log1p(10*Math.max(0, v)) / Math.log1p(10*Math.max(mx, 1e-6));
 function cvctx(id){ const cv=$(id); const dpr=devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight; if(!W||!H) return null;
   if (cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
   const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); return {ctx,W,H}; }
@@ -715,41 +737,43 @@ function heat(v){ // ink -> teal -> chartreuse -> white
   if (v<=0) return "#0e1218"; const t=Math.min(1,v);
   const r = t<0.5 ? 20+ (t/0.5)*40 : 60+((t-0.5)/0.5)*140, g = 40+t*200, b = t<0.5 ? 60+(t/0.5)*120 : 180-((t-0.5)/0.5)*120;
   return `rgb(${r|0},${g|0},${b|0})`; }
-function drawBrain(){
+function drawBrainMiMo(){
   const c = cvctx("cv_brain"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
-  if (!VIZ.brain){ idleText(ctx,W,H,"expert routing appears here once the engine hooks are live"); return; }
-  const L = VIZ.act.n_moe, E = 288, cw = W/E, ch = H/L;
-  for (let l=0;l<L;l++) for (let e=0;e<E;e++){ const v = VIZ.brain[l*E+e]; if (v>0.02){ ctx.fillStyle = heat(v); ctx.fillRect(e*cw, l*ch, Math.max(cw,1), Math.max(ch-0.5,1)); } }
-  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("layer 0", 4, 10); ctx.fillText("layer "+(L-1), 4, H-4);
-  ctx.textAlign="right"; ctx.fillText("expert 287 →", W-4, H-4);
-  // hot experts
-  const load = new Float32Array(E); for (let l=0;l<L;l++) for (let e=0;e<E;e++) load[e]+=VIZ.brain[l*E+e];
+  if (!VIZ.brain){ idleText(ctx,W,H,"expert routing appears here with the first request"); return; }
+  const L = VIZ.act.n_layers || 48, E = VIZ.act.experts || MD.E, l0 = 1, n = L - l0, cw = W/E, ch = H/n;   // rows = moe layers 1..47
+  for (let l=l0;l<L;l++) for (let e=0;e<E;e++){ const v = VIZ.brain[l*E+e]; if (v>0.02){ ctx.fillStyle = heat(v); ctx.fillRect(e*cw, (l-l0)*ch, Math.max(cw,1), Math.max(ch-0.5,1)); } }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("layer 1", 4, 10); ctx.fillText("layer "+(L-1), 4, H-4);
+  ctx.textAlign="right"; ctx.fillText(`expert ${E-1} →`, W-4, H-4);
+  const load = new Float32Array(E); for (let l=l0;l<L;l++) for (let e=0;e<E;e++) load[e]+=VIZ.brain[l*E+e];
   const top = [...load.keys()].sort((a,b)=>load[b]-load[a]).slice(0,5);
-  $("brain_sub").textContent = "hot: " + top.map(e=>"#"+e).join(" ");
+  $("brain_sub").textContent = `${VIZ.act.T} tok × top-${VIZ.act.topk || MD.K} · hot: ` + top.map(e=>"#"+e).join(" ");
 }
-function drawScan(){
+/* attention heads: per layer, the mean output magnitude of each of this rank's 32 heads (scaled per layer);
+   gold rows = the 9 global-attention layers, the rest slide over the last 128 tokens */
+function drawScanMiMo(){
   const c = cvctx("cv_scan"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
-  if (!VIZ.scan){ idleText(ctx,W,H,"attention positions appear here once the engine hooks are live"); return; }
-  const LM = VIZ.act.n_mla, bw = W/256, lh = H/LM;
-  for (let l=0;l<LM;l++){
-    for (let b=0;b<256;b++){ const v = VIZ.scan[l*256+b]; if (v>0.03){ ctx.fillStyle = `rgba(82,183,255,${Math.min(1,0.15+v)})`; ctx.fillRect(b*bw, l*lh+1, Math.max(bw,1), lh-2); } }
-    ctx.fillStyle="#1e242c"; ctx.fillRect(0, l*lh, W, 1);
-  }
-  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("start of context", 4, H-5); ctx.textAlign="right"; ctx.fillText("now", W-4, H-5);
+  if (!VIZ.heads){ idleText(ctx,W,H,"per-head attention magnitude appears here with the first request"); return; }
+  const L = VIZ.act.n_layers || 48, NH = VIZ.act.heads || MD.H, gx = 30, cw = (W-gx)/NH, lh = H/L;
+  for (let l=0;l<L;l++){ const full = MD.fullSet.has(l);
+    for (let h=0;h<NH;h++){ const v = VIZ.heads[l*NH+h]; if (v>0.03){ ctx.fillStyle = full ? `rgba(255,194,75,${Math.min(1,0.1+v)})` : `rgba(62,219,182,${Math.min(1,0.08+0.9*v)})`; ctx.fillRect(gx+h*cw+0.5, l*lh+0.5, Math.max(cw-1,1), Math.max(lh-1,1)); } }
+    if (full){ ctx.fillStyle = C.gold; ctx.fillRect(gx-6, l*lh+0.5, 3, Math.max(lh-1,1)); ctx.fillStyle="#8b95a3"; ctx.font="500 8.5px 'IBM Plex Mono'"; ctx.textAlign="right"; ctx.fillText("L"+l, gx-8, l*lh+lh*0.5+3); } }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="right"; ctx.fillText("head 31 →", W-4, H-4);
+  let hi = 0, hv = -1; for (let l=0;l<L;l++){ const r = VIZ.rib.length ? VIZ.rib[VIZ.rib.length-1][l] : 0; if (r > hv){ hv = r; hi = l; } }
+  $("scan_sub").textContent = `rank 0 holds heads 0-31 of 64 · ■ global (9) · ■ sliding-window 128 (39) · strongest layer L${hi}`;
 }
-function drawRibbon(){
+function drawRibbonMiMo(){
   const c = cvctx("cv_ribbon"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
-  if (!VIZ.rib.length){ idleText(ctx,W,H,"residual-stream magnitude per layer appears here once hooks are live"); return; }
+  if (!VIZ.rib.length){ idleText(ctx,W,H,"per-layer attention-output magnitude appears here with the first request"); return; }
   const N = VIZ.rib[0].length, n = VIZ.rib.length; let mx = 1e-6; for (const r of VIZ.rib) for (const v of r) if (v>mx) mx=v;
-  const cw = W/Math.max(n, 60), lh = H/N;   // stretch until ~5s of history exists
+  const cw = W/Math.max(n, 60), lh = H/N;   // stretch until ~6 s of history exists
   for (let i=0;i<n;i++){ const r = VIZ.rib[i], x = W - (n-i)*cw;
-    for (let l=0;l<N;l++){ const v = r[l]/mx; ctx.fillStyle = `rgba(200,245,66,${0.08+0.9*v*v})`; ctx.fillRect(x, l*lh, cw+0.5, lh-0.4); } }
+    for (let l=0;l<N;l++){ const v = logMag(r[l], mx); ctx.fillStyle = MD.fullSet.has(l) ? `rgba(255,194,75,${0.08+0.9*v*v})` : `rgba(200,245,66,${0.08+0.9*v*v})`; ctx.fillRect(x, l*lh, cw+0.5, lh-0.4); } }
   const last = VIZ.rib[n-1]; let hi=0; for (let l=0;l<N;l++) if (last[l]>last[hi]) hi=l;
-  $("ribbon_sub").textContent = `peak layer ${hi} · ${last[hi].toFixed(1)}`;
+  $("ribbon_sub").textContent = `layer 0 at top · log scale · peak layer ${hi} · ${last[hi].toFixed(1)} · gold = global attention`;
 }
 function drawKV(){
   const c = cvctx("cv_kv"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
-  const s = VIZ.sched; const pool = (s && s.pool_tokens) || 2146153;
+  const s = VIZ.sched; const pool = kvTotal() || (s && s.pool_tokens) || 3191849;
   const cols = 128, rows = 12, tiles = cols*rows, tw = W/cols, th = H/rows;
   const cell = i => [ (i%cols)*tw, Math.floor(i/cols)*th ];
   for (let i=0;i<tiles;i++){ const [x,y]=cell(i); ctx.fillStyle="#12161c"; ctx.fillRect(x+0.5,y+0.5,tw-1,th-1); }
@@ -765,7 +789,7 @@ function drawKV(){
   if (lines.length){ ctx.font = "600 11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; const lw = Math.max(...lines.map(l=>ctx.measureText(l[1]).width)) + 26, lh = 15;
     ctx.fillStyle = "rgba(11,13,16,0.82)"; ctx.fillRect(6, 6, lw, lines.length*lh + 8);
     lines.forEach(([col, txt], i)=>{ ctx.fillStyle = col; ctx.fillRect(12, 12 + i*lh, 8, 8); ctx.fillStyle = "#dfe6ee"; ctx.fillText(txt, 26, 20 + i*lh); }); }
-  $("kv_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); $("kv_title").textContent = kvTitle("kv pool");
+  $("kv_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s) + whoSummary(s); $("kv_title").textContent = kvTitle("kv pool");
   const kvh = $("cv_kv").parentElement.querySelector("h4"); if (kvh) kvh.textContent = `kv pool — ${(pool/1e6).toFixed(2)}M tokens`;
 }
 function gauge(ctx,x,y,r,v,max,label,unit,color){
@@ -778,41 +802,50 @@ function gauge(ctx,x,y,r,v,max,label,unit,color){
 function drawGauges(){
   const c = cvctx("cv_gauge"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
   const r = (LIVE&&LIVE.row)||{}, n=(LIVE&&LIVE.nodes)||{};
-  // bandwidth model: routed experts touched per step + fixed bf16 weights, times steps/s (per rank)
-  const tok = r.stepsz||0, steps = r.steps||0;
-  const distinct = 288*(1-Math.exp(-tok*9/288)), gb = (distinct*0.0063*42 + 7.4 + 0.067*33*Math.max(1,(r.run||1))/8) * steps;
+  // bandwidth model (per rank, from the collector's model profile): distinct routed experts touched per step x expert
+  // size x moe layers + fixed weights (attention, dense, lm_head, drafter) + KV reads of the live contexts, x steps/s
+  const bw = (LIVE && LIVE.profile && LIVE.profile.bw) || {experts:256, topk:8, moe_layers:47, expert_gb:0.00668, fixed_gb:5.9, kv_bytes_per_tok:3240, swa_bytes_per_req:3.6e6, kv_gb_per_run:0, peak_gb_s:273};
+  const tok = r.stepsz||0, steps = r.steps||0, reqs = (VIZ.sched && VIZ.sched.reqs) || [];
+  const kvgb = (reqs.length && bw.kv_bytes_per_tok) ? reqs.reduce((a,q)=>a+(q.total||0),0)*bw.kv_bytes_per_tok/1e9 + reqs.length*(bw.swa_bytes_per_req||0)/1e9 : (bw.kv_gb_per_run||0)*Math.max(1,(r.run||1));
+  const distinct = bw.experts*(1-Math.exp(-tok*bw.topk/bw.experts)), gb = steps ? (distinct*bw.expert_gb*bw.moe_layers + bw.fixed_gb + kvgb) * steps : 0;
   const items = [
-    [gb, 273, "memory bandwidth", "GB/s", C.acc], [(r.steps||0), 12, "engine steps", "/s", C.sky],
+    [gb, bw.peak_gb_s||273, "memory bandwidth", "GB/s", C.acc], [(r.steps||0), 12, "engine steps", "/s", C.sky],
     [(n.h&&n.h.gpu.power)||0, 100, "head power", "W", C.gold], [(n.w&&n.w.gpu.power)||0, 100, "worker power", "W", C.gold],
     [(n.h&&n.h.gpu.temp)||0, 95, "head temp", "°C", C.coral], [(n.w&&n.w.gpu.temp)||0, 95, "worker temp", "°C", C.coral],
     [(n.h&&n.h.gpu.sm_mhz)||0, 2300, "head clock", "MHz", C.lav], [(n.w&&n.w.gpu.sm_mhz)||0, 2300, "worker clock", "MHz", C.lav],
   ];
   const k = items.length, gw = W/k, rad = Math.min(38, H*0.32);
   items.forEach((it,i)=> gauge(ctx, gw*(i+0.5), H*0.45, rad, it[0], it[1], it[2], it[3], it[4]));
-  $("gauge_sub").textContent = `≈ ${gb.toFixed(0)} GB/s of ${273} peak per rank`;
+  $("gauge_sub").textContent = `≈ ${gb.toFixed(0)} GB/s of ${bw.peak_gb_s||273} peak per rank (estimate: experts touched + fixed weights + kv reads)`;
 }
 function idleText(ctx,W,H,msg){ ctx.fillStyle="#4a5462"; ctx.font="500 11px 'IBM Plex Mono'"; ctx.textAlign="center"; ctx.fillText(msg, W/2, H/2+4); }
-function drawViz(){ if (VIZ.three){ draw3D(); } else { drawBrain(); drawScan(); drawRibbon(); drawKV(); } drawGauges(); }
+function drawViz(){ if (!MODEL){ drawGauges(); return; } if (VIZ.three){ draw3D(); } else { drawBrain(); drawScan(); drawRibbon(); drawKV(); } drawGauges(); }
 
 /* ---------------- 3-D views (three.js) ---------------- */
 VIZ.three = (localStorage.getItem("viz_mode") || "3d") === "3d";
-VIZ.a3 = null; VIZ.lastStep3 = -1; VIZ.space = []; VIZ.spaceStat = null;
+VIZ.a3 = null; VIZ.lastStep3 = -1; VIZ.ah = null; VIZ.lastStepH = -1; VIZ.space = []; VIZ.spaceStat = null;
 const f16 = u => { const s=(u>>15)&1, e=(u>>10)&31, m=u&1023; let v = e===0 ? m*Math.pow(2,-24) : e===31 ? (m?NaN:Infinity) : (1+m/1024)*Math.pow(2,e-15); return s?-v:v; };
+// act3d frame: per-token routing [n_moe][T3][K] (u8 from the MiMo runtime, 255 = none; int16 from older runtimes),
+// the sampled positions' final hidden state projected to 3-D (h3n rows, request spans in h3reqs), accepted counts.
 function ingestAct3d(a){
-  const rb = Uint8Array.from(atob(a.routing3d), c=>c.charCodeAt(0)); a.r3 = new Int16Array(rb.buffer, 0, rb.byteLength>>1);
-  a.at = b64u8(a.attn3d);
-  a.kd = a.kda ? b64u8(a.kda) : null;          // per-KDA-layer head norms [46][64] (runtime >= 2026-09-11)
+  const rb = Uint8Array.from(atob(a.routing3d), c=>c.charCodeAt(0));
+  a.r3 = a.r3dtype === "u8" ? rb : new Int16Array(rb.buffer, 0, rb.byteLength>>1);
   const hb = Uint8Array.from(atob(a.h3), c=>c.charCodeAt(0)); const hu = new Uint16Array(hb.buffer, 0, hb.byteLength>>1);
   a.pts = new Float32Array(hu.length); for (let i=0;i<hu.length;i++) a.pts[i] = f16(hu[i]);
+  a.hn = a.h3n ?? a.T3;
+  if (a.attn3d) a.at = b64u8(a.attn3d);                      // GLM: DSA context bins [n_mla][TA][bins]
+  a.kd = a.kda ? b64u8(a.kda) : null;                          // GLM: per-KDA-layer head norms [46][64]
   VIZ.a3 = a;
-  // activation-space history (per token index), with running normalisation
-  const T = a.T3, st = VIZ.spaceStat || (VIZ.spaceStat = {m:[0,0,0], v:[1,1,1]});
+  // activation-space history (per sampled position), with running normalisation
+  const T = a.hn, st = VIZ.spaceStat || (VIZ.spaceStat = {m:[0,0,0], v:[1,1,1]});
   for (let t=0;t<T;t++) for (let k=0;k<3;k++){ const x=a.pts[t*3+k]; if(!isFinite(x)) continue; st.m[k]+= (x-st.m[k])*0.02; st.v[k]+= ((x-st.m[k])*(x-st.m[k])-st.v[k])*0.02; }
-  VIZ.space.push({T, p:a.pts, hues:tokenReqHue(a)}); if (VIZ.space.length > 90) VIZ.space.shift();
+  VIZ.space.push({T, p:a.pts, hues:tokenReqHue(a.h3reqs || a.reqs, T)}); if (VIZ.space.length > 90) VIZ.space.shift();
   for (const sc of Object.values(S3)) sc.dirty = true;
 }
+// act3h frame: per-token, per-head attention-output magnitude [n_layers][TA][heads] u8 (scaled per layer)
+function ingestAct3h(a){ a.v = b64u8(a.heads3d); VIZ.ah = a; if (S3.attn) S3.attn.dirty = true; }
 const S3 = {};
-function tokenReqHue(a){ const out = new Array(Math.max(a.T3, a.TA)).fill(null); if (!a.reqs) return out; for (const [id,start,count] of a.reqs){ const c = new THREE.Color().setHSL(reqHue(id), 0.85, 0.6); for (let t=start;t<start+count&&t<out.length;t++) out[t]=c; } return out; }
+function tokenReqHue(spans, n){ const out = new Array(Math.max(0, n|0)).fill(null); if (!spans) return out; for (const [id,start,count] of spans){ const c = new THREE.Color().setHSL(reqHue(id), 0.85, 0.6); for (let t=start;t<start+count&&t<out.length;t++) out[t]=c; } return out; }
 function mk3(id){
   const el = $(id); if (!el || !window.THREE) return null;
   const r = new THREE.WebGLRenderer({canvas:el, antialias:true, alpha:false, powerPreference:"high-performance"});
@@ -846,23 +879,22 @@ const heat3 = (v, out) => { const t=Math.min(1,Math.max(0,v)); out[0]=(t<0.5?20+
 const tokenHue = (i, n, out) => { const h=(i/Math.max(n,1))*0.85, c=new THREE.Color().setHSL(h, 0.9, 0.6); out[0]=c.r; out[1]=c.g; out[2]=c.b; return out; };
 const addMat = (extra={}) => Object.assign({color:0xffffff, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false}, extra);
 
-/* cortex: the model itself. GLM-5.3-Flash drawn as a 45-layer tower: tokenizer/embedding at the bottom, then per layer the
-   attention block (34 KDA linear-attention layers as head plates, 11 DSA sparse-attention layers as context bars) and the MLP
-   (3 dense plates, then 42 MoE plates of 24x12 = 288 experts + 1 shared), the LM head/sampler on top and the MTP draft layer
-   beside it. Strands are this step's tokens (colour = request) through the experts they were routed to; rays are where the DSA
-   layers read in the context; the spine is the residual-stream magnitude per layer. No token ids or text are shown or received:
-   the runtime only sends per-request counts. */
-const MD = (() => {
-  const dsa = [3,7,11,15,19,23,27,31,35,39,43];
-  const kda = []; for (let l=0;l<45;l++) if (!dsa.includes(l)) kda.push(l);
-  return {L:45, dsa, kda, kdaSet:new Set(kda), dense:new Set([0,1,2]), E:288, cols:24, K:9, DY:0.95, W:12, D:6,
-          yOf: l => l*0.95, yEmb:-3.2, yHead:45*0.95+1.4, xMtp:12.5, zAttn:-4.8, xSpine:-7.8,
-          moeLayer: o => o < 42 ? 3+o : -1, dsaLayer: o => o < 11 ? dsa[o] : -1};
+/* cortex: the model itself. MiMo-V2.6-Flash drawn as a 48-layer tower: tokenizer / vision encoder -> embedding at the
+   bottom, then per layer the attention block (32 head cells = rank 0's half of the 64 heads; the 9 global-attention
+   layers are gold, with a context rail that grows with the longest live context, the 39 sliding-window layers are teal
+   with a fixed 128-token rail) and the MLP (layer 0 dense, then 47 MoE plates of 16x16 = 256 experts, top-8, no shared
+   expert), the LM head / sampler on top and the DFlash drafter beside it (glows with the tokens it got accepted).
+   Strands are this step's tokens (colour = request) through the experts they were routed to; head cells glow with each
+   head's output magnitude; the spine is each layer's attention-output magnitude. No token ids or text are shown or
+   received: the runtime only sends per-request counts. */
+const MD_MIMO = (() => {
+  const full = [0,5,11,17,23,29,35,41,47], L = 48;
+  return {L, full, fullSet:new Set(full), E:256, cols:16, K:8, H:32, DY:0.95, W:8, D:8,
+          yOf: l => l*0.95, yEmb:-3.2, yHead:L*0.95+1.4, xDraft:10.5, zAttn:-6.0, xSpine:-6.6, tokX0:-4, tokW:8, logRib:true};
 })();
 const cellXZ = e => [ ((e%MD.cols) - (MD.cols-1)/2)*0.5, (Math.floor(e/MD.cols) - (MD.E/MD.cols-1)/2)*0.5 ];
-const plateOrigin = o => o < 42 ? {x:0, y:MD.yOf(3+o), z:0} : {x:MD.xMtp, y:MD.yHead, z:0};      // routing ordinal 42 = MTP layer
-const tokX = (t, n) => -6 + 12*(t+0.5)/Math.max(n,1);
-const binX = b => (b-31.5)*0.19;
+const headX = h => (h - (MD.H-1)/2)*0.25;
+const tokX = (t, n) => MD.tokX0 + MD.tokW*(t+0.5)/Math.max(n,1);   // per-model token row
 const reqHue = (id) => { let x=0; for (const ch of id) x=(x*31+ch.charCodeAt(0))>>>0; return (x%360)/360; };
 function textSprite(scaleX, scaleY){ const cv = document.createElement("canvas"); cv.width = 1024; cv.height = 72; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(scaleX, scaleY, 1); sp.userData = {cv, tex, text: ""}; return sp; }
@@ -872,7 +904,381 @@ function setText(sp, text, col, align){ if (sp.userData.text === text && sp.user
   const w = g.measureText(s).width + 52, x0 = align === "right" ? cv.width - w : 0;
   g.fillStyle = "rgba(11,13,16,0.78)"; g.fillRect(x0, 10, w, 52); if (col){ g.fillStyle = col; g.fillRect(x0+10, 26, 18, 18); }
   g.fillStyle = "#e8eef4"; g.fillText(s, x0 + (col ? 40 : 14), 36); tex.needsUpdate = true; sp.userData.text = text; sp.userData.col = col; }
-function initCortex(){
+function initCortexMiMo(){
+  const o = mk3("cv3_cortex"); if (!o) return; o.rad = o.rad0 = 62; o.theta = 0.62; o.phi = 1.28; o.target.set(1.0, MD.yOf(23), -1.5); S3.cortex = o;
+  const m = new THREE.Matrix4(), dim = new THREE.Color(0.012,0.016,0.022);
+  const inst = (geo, n, opacity=0.9) => { const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity, depthWrite:true}), n);   // solid plates: occlude, do not add
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3); for (let i=0;i<n;i++) mesh.setColorAt(i, dim); mesh.frustumCulled = false; o.s.add(mesh); return mesh; };
+  // MoE experts: 47 plates (layers 1..47), 16 x 16 cells each
+  o.ex = inst(new THREE.BoxGeometry(0.42,0.2,0.42), (MD.L-1)*MD.E, 0.75);
+  for (let l=1;l<MD.L;l++) for (let e=0;e<MD.E;e++){ const [x,z]=cellXZ(e); m.makeTranslation(x, MD.yOf(l), z); o.ex.setMatrixAt((l-1)*MD.E+e, m); }
+  o.ex.instanceMatrix.needsUpdate = true; o.hist = new Float32Array((MD.L-1)*MD.E);
+  // dense MLP plate (layer 0)
+  o.dn = inst(new THREE.BoxGeometry(MD.W,0.22,MD.D), 1, 0.7); m.makeTranslation(0, MD.yOf(0), 0); o.dn.setMatrixAt(0, m); o.dn.instanceMatrix.needsUpdate = true;
+  // attention heads behind each plate (rank 0's 32 of 64); global layers taller
+  o.hd = inst(new THREE.BoxGeometry(0.2,0.3,0.5), MD.L*MD.H, 0.9);
+  for (let l=0;l<MD.L;l++){ const g = MD.fullSet.has(l); for (let h=0;h<MD.H;h++){ m.makeScale(1, g?1.7:1, g?1.3:1); m.setPosition(headX(h), MD.yOf(l), MD.zAttn); o.hd.setMatrixAt(l*MD.H+h, m); } }
+  o.hd.instanceMatrix.needsUpdate = true; o.hhist = new Float32Array(MD.L*MD.H);
+  // context rails (how far back each layer attends), spine, embedding + LM-head plates, drafter plates, token dots
+  o.rl = inst(new THREE.BoxGeometry(0.16,0.16,1), MD.L, 0.95);
+  o.sp = inst(new THREE.BoxGeometry(0.6, MD.DY*0.9, 0.6), MD.L, 0.8); for (let l=0;l<MD.L;l++){ m.makeTranslation(MD.xSpine, MD.yOf(l), 0); o.sp.setMatrixAt(l, m); } o.sp.instanceMatrix.needsUpdate = true;
+  o.st = inst(new THREE.BoxGeometry(MD.W+1, 0.25, MD.D+1), 2, 0.6); m.makeTranslation(0, MD.yEmb, 0); o.st.setMatrixAt(0, m); m.makeTranslation(0, MD.yHead, 0); o.st.setMatrixAt(1, m); o.st.instanceMatrix.needsUpdate = true;
+  o.st.setColorAt(0, new THREE.Color(0.05,0.06,0.08)); o.st.setColorAt(1, new THREE.Color(0.05,0.06,0.08)); o.st.instanceColor.needsUpdate = true;
+  o.dr = inst(new THREE.BoxGeometry(4.2,0.2,4.2), 5, 0.75); for (let i=0;i<5;i++){ m.makeTranslation(MD.xDraft, MD.yHead-(4-i)*MD.DY, 0); o.dr.setMatrixAt(i, m); } o.dr.instanceMatrix.needsUpdate = true;
+  o.tk = inst(new THREE.SphereGeometry(0.28, 8, 6), 32, 1.0); o.tk.count = 0;
+  // strands (token -> dense -> expert ... -> head)
+  const mkLines = (cap, opacity) => { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap*6),3)); g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cap*6),3));
+    const ln = new THREE.LineSegments(g, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity}))); ln.frustumCulled = false; o.s.add(ln); return ln; };
+  o.strands = mkLines(32*8*(MD.L+2), 0.16);
+  // static frame: plate outlines at the bottom/top, tower edges, drafter link
+  const fp = [], hx = MD.W/2+0.5, hz = MD.D/2+0.5;
+  for (const y of [MD.yEmb, MD.yHead]) fp.push(-hx,y,-hz, hx,y,-hz, hx,y,-hz, hx,y,hz, hx,y,hz, -hx,y,hz, -hx,y,hz, -hx,y,-hz);
+  for (const [x,z] of [[-hx,-hz],[hx,-hz],[hx,hz],[-hx,hz]]) fp.push(x,MD.yEmb,z, x,MD.yHead,z);
+  fp.push(hx, MD.yHead, 0, MD.xDraft-2.1, MD.yHead, 0);
+  const fg = new THREE.BufferGeometry(); fg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fp),3)); o.s.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({color:0x232a34})));
+  // labels
+  const lab = (text, x, y, z, sx=13, sy=0.95, align) => { const sp = textSprite(sx, sy); setText(sp, text, null, align); sp.position.set(x,y,z); o.s.add(sp); return sp; };
+  lab("tokenizer · vision encoder → embedding", -4.0, MD.yEmb-1.0, 4.0, 18, 1.15);
+  lab("LM head → sampler", -4.0, MD.yHead+1.1, 4.0, 16, 1.15);
+  o.drLabel = lab("draft head", MD.xDraft, MD.yHead+1.6, 2.4, 21, 1.05);
+  lab("attention output magnitude", MD.xSpine-1.5, MD.yOf(MD.L)+0.6, 0, 13, 0.95);
+  lab("attention heads (32 of 64) · context reach →", 0, MD.yOf(MD.L)+0.6, MD.zAttn, 20, 1.05);
+  for (const l of MD.full) lab(`L${l} · global + ${l ? "moe" : "dense"}`, -12.6, MD.yOf(l), 0, 11, 0.9);
+  o.tin = []; o.tout = [];      // per-request count labels, created on demand
+}
+function poolText3(o, list, n, y0, dir, x, z){ while (list.length < n){ const sp = textSprite(30, 1.7); o.s.add(sp); list.push(sp); } list.forEach((sp,i)=>{ sp.visible = i < n; if (i < n) sp.position.set(x, y0 + dir*(2.4 + i*1.7), z); }); }
+function drawCortexMiMo(){
+  const o = S3.cortex; if (!o || !place(o)) return;
+  if (o.dirty){
+    const a = VIZ.a3, c = new THREE.Color(), rgb = [0,0,0], m = new THREE.Matrix4();
+    const T = a ? a.T3 : 0, K = a ? (a.topk || MD.K) : MD.K, nMoe = a ? Math.min(a.n_moe, MD.L-1) : 0;
+    const hues = tokenReqHue(a && a.reqs, T), hueOf = t => hues[t] || c.setHSL((t/Math.max(T,1))*0.85, 0.9, 0.6).clone();
+    // --- experts: decay then add this step's routing
+    for (let i=0;i<o.hist.length;i++) o.hist[i] *= 0.82;
+    if (a) for (let l=0;l<nMoe;l++) for (let t=0;t<T;t++) for (let k=0;k<K;k++){ const e = a.r3[(l*T+t)*K+k]; if (e < 0 || e >= MD.E) continue; const i = l*MD.E+e; o.hist[i] = Math.min(1, o.hist[i] + 0.35); }
+    for (let i=0;i<o.hist.length;i++){ const v = o.hist[i]; if (v < 0.03) o.ex.setColorAt(i, c.setRGB(0.05,0.06,0.075)); else { heat3(v*0.9, rgb); o.ex.setColorAt(i, c.setRGB(rgb[0]*0.85, rgb[1]*0.85, rgb[2]*0.85)); } }
+    o.ex.instanceColor.needsUpdate = true;
+    // --- attention heads: per-head output magnitude from the latest act frame (scaled per layer)
+    const hm = VIZ.headMeans;
+    for (let l=0;l<MD.L;l++){ const g = MD.fullSet.has(l); for (let h=0;h<MD.H;h++){ const i = l*MD.H+h; o.hhist[i] = Math.max(o.hhist[i]*0.75, hm ? hm[i]/255 : 0); const w = o.hhist[i];
+        o.hd.setColorAt(i, g ? c.setRGB(0.07+0.9*w, 0.06+0.68*w, 0.02+0.12*w) : c.setRGB(0.03+0.2*w, 0.06+0.75*w, 0.08+0.6*w)); } }
+    o.hd.instanceColor.needsUpdate = true;
+    // --- spine (per-layer attention-output magnitude) + dense plate glow
+    const rib = VIZ.rib.length ? VIZ.rib[VIZ.rib.length-1] : null; let mx = 1e-6; if (rib) for (const v of rib) if (v > mx) mx = v;
+    for (let l=0;l<MD.L;l++){ const v = rib ? logMag(rib[l], mx) : 0; o.sp.setColorAt(l, c.setRGB(0.08+0.85*v, 0.07+0.62*v, 0.02+0.12*v)); }
+    { const v = rib ? logMag(rib[0], mx) : 0; o.dn.setColorAt(0, c.setRGB(0.04+0.25*v, 0.05+0.35*v, 0.07+0.25*v)); }
+    o.sp.instanceColor.needsUpdate = true; o.dn.instanceColor.needsUpdate = true;
+    // --- context rails: global layers reach the longest live context (log scale), sliding-window layers 128 tokens
+    const reqs = (VIZ.sched && VIZ.sched.reqs) || [], maxCtx = reqs.reduce((s,q)=>Math.max(s, q.total||0), 0);
+    for (let l=0;l<MD.L;l++){ const g = MD.fullSet.has(l), len = g ? 1.2 + 2.4*Math.log10(Math.max(maxCtx,128)/128) : 1.2;
+      m.makeScale(1, 1, len); m.setPosition(headX(MD.H-1)+0.5, MD.yOf(l), MD.zAttn-0.4-len/2); o.rl.setMatrixAt(l, m);
+      const w = g ? (maxCtx ? 0.95 : 0.35) : 0.5; o.rl.setColorAt(l, g ? c.setRGB(0.95*w, 0.7*w, 0.2*w) : c.setRGB(0.15*w, 0.75*w, 0.6*w)); }
+    o.rl.instanceMatrix.needsUpdate = true; o.rl.instanceColor.needsUpdate = true;
+    // --- drafter: which one runs (from the engine log via the collector) and how many tokens it got accepted
+    const dr = (LIVE && LIVE.drafter) || null, k = dr ? dr.k : 7, isMtp = dr && dr.method === "mtp";
+    setText(o.drLabel, dr ? (isMtp ? `MTP draft head · ${k} draft tokens / step` : `${dr.method.toUpperCase()} drafter · ${k} draft tokens / step`) : "draft head", null);
+    o.dr.count = isMtp ? 1 : 5;
+    const acc = (a && a.acc) || [], accMean = acc.length ? acc.reduce((s,q)=>s+q[1],0)/acc.length : 0, dw = Math.min(1, accMean/(k+1));
+    for (let i=0;i<5;i++) o.dr.setColorAt(i, c.setRGB(0.05+0.45*dw, 0.06+0.25*dw, 0.08+0.85*dw)); o.dr.instanceColor.needsUpdate = true;
+    // --- token dots + strands through the experts each token was routed to
+    o.tk.count = Math.min(T, 32);
+    for (let t=0;t<o.tk.count;t++){ m.makeTranslation(tokX(t,T), MD.yEmb+0.45, 0); o.tk.setMatrixAt(t, m); o.tk.setColorAt(t, hueOf(t)); }
+    o.tk.instanceMatrix.needsUpdate = true; if (o.tk.instanceColor) o.tk.instanceColor.needsUpdate = true;
+    const sp = o.strands.geometry.attributes.position.array, sc = o.strands.geometry.attributes.color.array; let ns = 0; const cap = 32*8*(MD.L+2);
+    const seg = (x0,y0,z0,x1,y1,z1,hc,w) => { if (ns >= cap) return; sp.set([x0,y0,z0,x1,y1,z1], ns*6); sc.set([hc.r*w,hc.g*w,hc.b*w, hc.r*w,hc.g*w,hc.b*w], ns*6); ns++; };
+    for (let t=0;t<Math.min(T,32);t++){ const hc = hueOf(t), xt = tokX(t,T);
+      for (let k=0;k<K;k++){ let px = xt, py = MD.yEmb+0.45, pz = 0;
+        seg(px,py,pz, xt*0.35, MD.yOf(0), (k-3.5)*0.4, hc, 0.9); px = xt*0.35; py = MD.yOf(0); pz = (k-3.5)*0.4;
+        for (let l=1;l<=nMoe;l++){ const e = a.r3[((l-1)*T+t)*K+k]; if (e < 0 || e >= MD.E) continue; const [x,z] = cellXZ(e); seg(px,py,pz, x,MD.yOf(l),z, hc, 0.9); px = x; py = MD.yOf(l); pz = z; }
+        seg(px,py,pz, xt*0.5, MD.yHead, 0, hc, 0.9); } }
+    o.strands.geometry.setDrawRange(0, ns*2); o.strands.geometry.attributes.position.needsUpdate = true; o.strands.geometry.attributes.color.needsUpdate = true;
+    // --- per-request counts only (no token ids or text ever reach the page): tokens entering this step, tokens accepted
+    const tin = ((a && a.reqs)||[]).map(([id,s,n]) => [id, `${id} · ${n} tok in`]);
+    const tout = acc.map(([id,n]) => [id, `${id} · ${n} accepted`]);
+    poolText3(o, o.tin, Math.min(tin.length, 8), MD.yEmb, -1, 0, 4.0); tin.slice(0,8).forEach(([id,txt],i) => setText(o.tin[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
+    poolText3(o, o.tout, Math.min(tout.length, 8), MD.yHead, 1, 0, 4.0); tout.slice(0,8).forEach(([id,txt],i) => setText(o.tout[i], txt, `hsl(${reqHue(id)*360},85%,60%)`));
+    const rq = (a && a.reqs) || []; $("cx_sub").innerHTML = (rq.length ? rq.map(([id,s,n]) => `<span style="color:hsl(${reqHue(id)*360},85%,60%)">■</span> ${id} · ${n} tok`).join(" &nbsp; ") : "no tokens this step")
+      + ` &nbsp;·&nbsp; 48 layers (9 global + 39 swa-128) · 47 moe × 256, top-8 · ${dr ? dr.method + " " + dr.k : "spec decode"} · ${maxCtx ? "longest context " + fmtK(maxCtx) + " · " : ""}drag to orbit · right-drag to pan`;
+    o.dirty = false;
+  }
+  o.r.render(o.s, o.c);
+}
+/* attention heads volume: points at (head, token, layer) = per-token output magnitude of each of rank 0's heads,
+   scaled per layer; gold = global-attention layers, teal = sliding-window layers */
+const AV_MIMO = {L:48, T:16, H:32};
+function initAttnMiMo(){
+  const o = mk3("cv3_attn"); if (!o) return; o.rad = o.rad0 = 64; o.theta = 0.9; o.phi = 1.1; o.target.set(0, 0, -(AV.L-1)*0.6);
+  const n = AV.L*AV.T*AV.H, pos = new Float32Array(n*3), col = new Float32Array(n*3);
+  for (let l=0;l<AV.L;l++) for (let t=0;t<AV.T;t++) for (let h=0;h<AV.H;h++){ const i=(l*AV.T+t)*AV.H+h; pos[i*3]=(h-(AV.H-1)/2)*0.55; pos[i*3+1]=(t-(AV.T-1)/2)*0.9; pos[i*3+2]=-l*1.2; }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos,3)); g.setAttribute("color", new THREE.BufferAttribute(col,3));
+  o.pts = new THREE.Points(g, new THREE.PointsMaterial(addMat({vertexColors:true, size:0.42, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
+  o.acc = new Float32Array(n); S3.attn = o;
+}
+function drawAttnMiMo(){
+  const o = S3.attn; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.ah){ const a = VIZ.ah, NHa = a.heads || 32, L = Math.min(a.n_layers || 48, AV.L), T = Math.min(a.TA, AV.T), NH = Math.min(NHa, AV.H), col = o.pts.geometry.attributes.color.array;
+    for (let i=0;i<o.acc.length;i++){ o.acc[i]*=0.6; if (o.acc[i]<0.05) o.acc[i]=0; }
+    for (let l=0;l<L;l++) for (let t=0;t<T;t++) for (let h=0;h<NH;h++){ const v = a.v[(l*a.TA+t)*NHa+h]/255, i = (l*AV.T+t)*AV.H+h; if (v > o.acc[i]) o.acc[i] = v; }
+    for (let i=0;i<o.acc.length;i++){ const v = o.acc[i] < 0.15 ? 0 : o.acc[i], l = Math.floor(i/(AV.T*AV.H)), g = MD.fullSet.has(l);
+      col[i*3] = (g ? 1.0 : 0.24)*v; col[i*3+1] = (g ? 0.76 : 0.86)*v; col[i*3+2] = (g ? 0.3 : 0.71)*v; }
+    o.pts.geometry.attributes.color.needsUpdate = true; $("av_sub").textContent = `${L} layers · ${T} tokens · ${NH} heads (rank 0) · gold = global attention · scaled per layer`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* activation space: hidden-state trajectories */
+function initSpace(){
+  const o = mk3("cv3_space"); if (!o) return; o.rad = o.rad0 = 34; o.phi = 1.0;
+  const N = 32*90; const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*3),3)); pg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*3),3));
+  o.pts = new THREE.Points(pg, new THREE.PointsMaterial(addMat({vertexColors:true, size:1.1, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
+  const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*2*3),3)); lg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*2*3),3));
+  o.trails = new THREE.LineSegments(lg, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity:0.55}))); o.trails.frustumCulled=false; o.s.add(o.trails);
+  const ax = new THREE.BufferGeometry(); ax.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-14,0,0,14,0,0, 0,-14,0,0,14,0, 0,0,-14,0,0,14]),3)); o.s.add(new THREE.LineSegments(ax, new THREE.LineBasicMaterial({color:0x1e242c})));
+  S3.space = o;
+}
+function drawSpace(){
+  const o = S3.space; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.space.length){ const st = VIZ.spaceStat, H = VIZ.space, pos=o.pts.geometry.attributes.position.array, col=o.pts.geometry.attributes.color.array, lp=o.trails.geometry.attributes.position.array, lc=o.trails.geometry.attributes.color.array;
+    const nrm = (x,k)=> Math.max(-14, Math.min(14, (x-st.m[k])/Math.sqrt(st.v[k]+1e-6)*5.5)); let n=0, s=0; const rgb=[0,0,0];
+    for (let h=0;h<H.length;h++){ const age = 1-(h/(H.length-1||1)), f=H[h], T=f.T;
+      const trh = f.hues; for (let t=0;t<T;t++){ const x=nrm(f.p[t*3],0), y=nrm(f.p[t*3+1],1), z=nrm(f.p[t*3+2],2); if (trh && trh[t]){ rgb[0]=trh[t].r; rgb[1]=trh[t].g; rgb[2]=trh[t].b; } else tokenHue(t, T, rgb); const w=Math.pow(1-age, 1.5)*0.9+0.05;
+        pos.set([x,y,z], n*3); col.set([rgb[0]*w, rgb[1]*w, rgb[2]*w], n*3); n++;
+        if (h>0 && t<H[h-1].T){ const g=H[h-1]; lp.set([nrm(g.p[t*3],0),nrm(g.p[t*3+1],1),nrm(g.p[t*3+2],2), x,y,z], s*6); lc.set([rgb[0]*w*0.6,rgb[1]*w*0.6,rgb[2]*w*0.6, rgb[0]*w,rgb[1]*w,rgb[2]*w], s*6); s++; } } }
+    o.pts.geometry.setDrawRange(0,n); o.trails.geometry.setDrawRange(0,s*2);
+    for (const g of [o.pts.geometry, o.trails.geometry]){ g.attributes.position.needsUpdate=true; g.attributes.color.needsUpdate=true; }
+    $("as_sub").textContent = `${H[H.length-1].T} tokens · ${H.length} steps of trail`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* residual terrain: heightfield over (layer, time) */
+const RT = {W:48, D:120};
+function initTerrain(){
+  const o = mk3("cv3_terrain"); if (!o) return; o.rad = o.rad0 = 70; o.theta = 0.35; o.phi = 1.05; o.target.set(0, 3, -RT.D*0.5*0.5); o.auto = false;
+  const n = RT.W*RT.D, pos = new Float32Array(n*3), col = new Float32Array(n*3), idx = [];
+  for (let d=0; d<RT.D; d++) for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; pos[i*3]=(w-(RT.W-1)/2)*0.9; pos[i*3+1]=0; pos[i*3+2]=-d*0.5; }
+  for (let d=0; d<RT.D-1; d++) for (let w=0; w<RT.W-1; w++){ const a=d*RT.W+w, b=a+1, c=a+RT.W, e=c+1; idx.push(a,c,b, b,c,e); }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos,3)); g.setAttribute("color", new THREE.BufferAttribute(col,3)); g.setIndex(idx);
+  o.mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, side:THREE.DoubleSide, transparent:true, opacity:0.85})); o.s.add(o.mesh);
+  o.wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:0xc8f542, wireframe:true, transparent:true, opacity:0.12})); o.s.add(o.wire);
+  S3.terrain = o;
+}
+function drawTerrain(){
+  const o = S3.terrain; if (!o || !place(o)) return;
+  if (o.dirty && VIZ.rib.length){ const H = VIZ.rib.slice(-RT.D), pos=o.mesh.geometry.attributes.position.array, col=o.mesh.geometry.attributes.color.array; let mx=1e-6; for (const r of H) for (const v of r) if (v>mx) mx=v;
+    for (let d=0; d<RT.D; d++){ const r = H[H.length-1-d]; for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; const v = r && w<r.length ? (MD.logRib ? logMag(r[w], mx) : r[w]/mx) : 0; pos[i*3+1] = v*9; const t=Math.pow(v,0.8); col[i*3]=0.08+0.7*t; col[i*3+1]=0.16+0.8*t; col[i*3+2]=0.2+0.05*t; } }
+    o.mesh.geometry.attributes.position.needsUpdate=true; o.mesh.geometry.attributes.color.needsUpdate=true; o.mesh.geometry.computeBoundingSphere();
+    $("rt_sub").textContent = `${H.length} steps${MD.logRib ? " · log height" : ""} · peak layer ${H[H.length-1].indexOf(Math.max(...H[H.length-1]))}`; o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* kv rack: requests as rows of blocks */
+// Pool occupancy in page IDs (hybrid layout: the global, sliding-window and drafter KV groups share one pool of page ids). "cached" pages are the prefix
+// cache; when free hits 0 the next prefill evicts the least recently used session.
+function poolText(s){ if (s.blocks_total == null) return ""; const inuse = s.blocks_total - (s.blocks_evictable ?? 0);
+  return ` · pool ${s.blocks_total} pages: ${inuse} in use · ${s.blocks_cached ?? "?"} cached · ${s.blocks_free ?? "?"} free${s.groups ? ` · ${s.groups} groups` : ""}`; }
+const fmtK = v => v >= 1e6 ? (v/1e6).toFixed(2)+"M" : v >= 1e3 ? Math.round(v/1e3)+"K" : String(v);
+// KV capacity in tokens = the engine's "GPU KV cache size" (all cache groups), relayed by the collector.
+const kvTotal = () => (LIVE && LIVE.kv_total_tokens) || null;
+function kvUsedText(s){ const tot = kvTotal(), pct = (s.usage*100); return tot ? `${fmtTok(s.usage*tot)} of ${fmtTok(tot)} tokens used · ${pct.toFixed(1)}%` : `${pct.toFixed(1)}% used`; }
+function kvTitle(base){ const tot = kvTotal(); return tot ? `${base} — ${fmtTok(tot)} tokens` : base; }
+// who sent it: Tailscale user@machine or LAN machine, from the API proxy (collector attribute_reqs); "?" = came in before the proxy
+function whoLabel(r){ return (r.who && r.who.label) || null; }
+function reqLabel(r){ const w = whoLabel(r);
+  if (r.computed < r.prompt) return w ? `${r.id} · ${w} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}% of ${fmtK(r.prompt)}` : `${r.id} · ${fmtK(r.computed)}/${fmtK(r.prompt)} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}%`;
+  return w ? `${r.id} · ${w} · ${fmtK(r.total)} ctx` : `${r.id} · ${fmtK(r.total)} ctx · generating`; }
+function whoSummary(s){ const reqs = (s && s.reqs) || []; if (!s || !s.attribution || !reqs.length) return "";
+  const n = {}; reqs.forEach(r => { const w = whoLabel(r) || "unattributed"; n[w] = (n[w]||0) + 1; });
+  return " · " + Object.entries(n).sort((a,b)=>b[1]-a[1]).map(([w,c]) => `${w} ×${c}`).join(", "); }
+function labelSprite(){ const cv = document.createElement("canvas"); cv.width = 512; cv.height = 64; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(15, 1.9, 1); sp.userData = {cv, tex, text: ""}; return sp; }
+function setLabel(sp, text, col){ if (sp.userData.text === text && sp.userData.col === col) return; const {cv, tex} = sp.userData, g = cv.getContext("2d");
+  g.clearRect(0,0,cv.width,cv.height); g.fillStyle = "rgba(11,13,16,0.75)"; g.fillRect(0, 8, cv.width, 48); g.fillStyle = col; g.fillRect(10, 22, 18, 18);
+  g.font = `600 ${text.length > 32 ? 21 : 26}px 'IBM Plex Mono', monospace`; g.fillStyle = "#e8eef4"; g.textBaseline = "middle"; g.fillText(text, 40, 32); tex.needsUpdate = true; sp.userData.text = text; sp.userData.col = col; }
+function initKV3(){
+  const o = mk3("cv3_kv"); if (!o) return; o.rad = o.rad0 = 40; o.theta = 0.5; o.phi = 1.0; o.target.set(0, 0, -8);
+  o.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8,1,0.8), new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.95}), 8*96);
+  o.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(8*96*3), 3);   // must exist before the first render or the shader ignores per-instance colour
+  o.mesh.count = 0; o.s.add(o.mesh);
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(96, 20), new THREE.MeshBasicMaterial({color:0x12161c, side:THREE.DoubleSide})); fl.rotation.x = -Math.PI/2; fl.position.set(0,-0.81,-8); o.s.add(fl);
+  o.labels = [];
+  S3.kv = o;
+}
+function drawKV3(){
+  const o = S3.kv; if (!o || !place(o)) return;
+  const s = VIZ.sched; if (s && (o.dirty || s.ts !== o.lastTs)){ o.lastTs = s.ts; const pool = kvTotal() || s.pool_tokens || 3191849, pal=[C.acc,C.sky,C.coral,C.lav,C.gold,C.teal,C.pink,"#9db4ff"]; const m=new THREE.Matrix4(), c=new THREE.Color(); let n=0;
+    (s.reqs||[]).slice(0,8).forEach((r,k)=>{ const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))), done=Math.round(nb*r.computed/Math.max(r.total,1)); const z=-(k-3.5)*2.2;
+      for (let i=0;i<nb&&n<768;i++){ const isHead = (r.computed<r.prompt && i===done), h = i<done ? 1.8 : 0.5; m.makeScale(1, isHead?2.6:h, 1); m.setPosition((i-(nb-1)/2)*0.95, (isHead?2.6:h)/2-0.8, z); o.mesh.setMatrixAt(n, m); c.set(pal[k%8]); if (i>=done && !isHead) c.multiplyScalar(0.3); if (isHead) c.set(0xffffff); o.mesh.setColorAt(n, c); n++; } });
+    o.mesh.count = n; o.mesh.instanceMatrix.needsUpdate = true; if (o.mesh.instanceColor) o.mesh.instanceColor.needsUpdate = true;
+    // one floating label per request row: id · computed/prompt · prefill % (or generating)
+    const reqs = (s.reqs||[]).slice(0,8);
+    while (o.labels.length < reqs.length){ const sp = labelSprite(); o.s.add(sp); o.labels.push(sp); }
+    while (o.labels.length > reqs.length){ const sp = o.labels.pop(); o.s.remove(sp); }
+    reqs.forEach((r,k)=>{ const sp = o.labels[k]; const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))); setLabel(sp, reqLabel(r), pal[k%8]); sp.position.set(0, 2.9 + k*1.5, -(k-3.5)*2.2); });   // stacked above the rack so they never overlap
+    { const lg = $("kv3_legend"); const all = (s.reqs||[]); if (lg){ lg.replaceChildren(); lg.classList.toggle("many", all.length > 8); all.forEach((r,k)=>{ const row = document.createElement("div"); row.className = "row";
+        const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = pal[k%8];
+        const tx = document.createElement("span"); tx.textContent = reqLabel(r);
+        const bar = document.createElement("span"); bar.className = "bar"; const fill = document.createElement("span"); fill.className = "fill"; fill.style.background = pal[k%8];
+        fill.style.width = (r.computed < r.prompt ? Math.round(100*r.computed/Math.max(r.prompt,1)) : 100) + "%"; bar.appendChild(fill);
+        row.append(sw, tx, bar); lg.appendChild(row); }); lg.hidden = all.length === 0; } }
+    $("kv3_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s) + whoSummary(s); $("kv3_title").textContent = kvTitle("kv pool — requests × blocks"); o.dirty=false; }
+  o.r.render(o.s, o.c);
+}
+/* requests: one lane per live request. Left of the centre wall = its input (prompt) bar, log length, split into
+   cached prefix / prefilled / pending; right = its output (generated tokens) bar, log length. Particles flow into the
+   wall at the live prefill rate and out of it at the live generation rate; the pillar on the wall is the current
+   tok/s (sky = prefill, lime = generation), the ring's size the DFlash tokens per step. Counts only (collector
+   req_stats), never token ids or text. */
+const RQ = {MAXL:16, LANE:2.6, P:26, X:22, H:0.9};
+// labels in this panel keep a constant on-screen size (sizeAttenuation off): k = box height as a fraction of the view
+function hudSprite(k, cx = 0.5){ const sp = textSprite(1, 1); sp.material = new THREE.SpriteMaterial({map: sp.userData.tex, transparent: true, depthTest: false, sizeAttenuation: false});
+  sp.scale.set(k * 1024 / 72, k, 1); sp.center.set(cx, 0.5); return sp; }
+const rqLen = t => RQ.X * Math.min(1, Math.log10(1 + Math.max(0, t)) / 6);           // 1M tokens = full half-width
+const rqPillar = v => v ? 1.2 + 3.2 * Math.log10(1 + v) : 0;                        // 10 tok/s ≈ 4.5, 1000 ≈ 10.8
+function fmtRate(v){ return v == null ? "—" : v >= 100 ? Math.round(v) + "" : v.toFixed(1); }
+function fmtDur(s){ if (s == null) return "—"; if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + "s"; const m = Math.floor(s/60); return m < 60 ? `${m}m${String(Math.round(s%60)).padStart(2,"0")}s` : `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}m`; }
+function rqText(r){ const st = r.stats || {}, w = whoLabel(r), pre = r.computed < r.prompt;
+  const parts = [r.id]; if (w) parts.push(w);
+  parts.push(`in ${fmtK(r.prompt)}` + (st.cached != null ? ` (${fmtK(st.cached)} cached)` : ""));
+  if (pre) parts.push(`prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}% @ ${fmtRate(st.prefill_tps)} tok/s`);
+  else { parts.push(`out ${fmtK(st.generated ?? (r.total - r.prompt))}`); parts.push(`${fmtRate(st.gen_tps)} tok/s` + (st.gen_tps_avg != null ? ` (avg ${fmtRate(st.gen_tps_avg)})` : "")); }
+  if (st.tau != null) parts.push(`${st.tau.toFixed(1)} tok/step`);
+  if (st.ttft_s != null) parts.push(`ttft ${st.ttft_upper ? "≤" : ""}${fmtDur(st.ttft_s)}`); else if (st.queue_s != null) parts.push(`queued ${fmtDur(st.queue_s)}`);
+  parts.push(`age ${fmtDur(r.age)}`);
+  return parts.join(" · "); }
+function initReqs3(){
+  const o = mk3("cv3_reqs"); if (!o) return; o.rad = o.rad0 = 44; o.theta = 0.3; o.phi = 0.98; o.target.set(8, 3.2, 0);   // scene left of the detail list
+  const N = RQ.MAXL * 5;
+  o.bars = new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshBasicMaterial({color:0xffffff}), N);
+  o.bars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N*3), 3); o.bars.count = 0; o.s.add(o.bars);
+  o.rings = new THREE.InstancedMesh(new THREE.TorusGeometry(1, 0.07, 6, 32), new THREE.MeshBasicMaterial({color:new THREE.Color(C.lav)}), RQ.MAXL);
+  o.rings.count = 0; o.s.add(o.rings);
+  const pg = new THREE.BufferGeometry(); o.ppos = new Float32Array(RQ.MAXL*RQ.P*3); o.pcol = new Float32Array(RQ.MAXL*RQ.P*3);
+  pg.setAttribute("position", new THREE.BufferAttribute(o.ppos, 3)); pg.setAttribute("color", new THREE.BufferAttribute(o.pcol, 3));
+  o.pts = new THREE.Points(pg, new THREE.PointsMaterial(addMat({size:0.8, vertexColors:true, sizeAttenuation:true, depthTest:false}))); o.pts.renderOrder = 2; o.pts.frustumCulled = false; o.s.add(o.pts);   // bounds would freeze at the first (empty) frame
+  o.phase = new Float32Array(RQ.MAXL*RQ.P).map(()=>Math.random());
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(2*RQ.X + 8, RQ.MAXL*RQ.LANE + 6), new THREE.MeshBasicMaterial({color:0x10141a, side:THREE.DoubleSide})); fl.rotation.x = -Math.PI/2; fl.position.y = -0.02; o.s.add(fl);
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(RQ.MAXL*RQ.LANE + 6, 12), new THREE.MeshBasicMaterial({color:0x52b7ff, transparent:true, opacity:0.05, side:THREE.DoubleSide, depthWrite:false})); wall.rotation.y = Math.PI/2; wall.position.y = 6; o.s.add(wall);
+  // log-scale ticks on the floor, both sides of the first-token wall
+  o.ticks = [];
+  for (const [t, lab] of [[1e3,"1K"],[1e4,"10K"],[1e5,"100K"],[1e6,"1M"]]) for (const sgn of [-1, 1]){
+    const x = sgn * rqLen(t), ln = new THREE.Mesh(new THREE.PlaneGeometry(0.06, RQ.MAXL*RQ.LANE + 4), new THREE.MeshBasicMaterial({color:0x2a323d, side:THREE.DoubleSide}));
+    ln.rotation.x = -Math.PI/2; ln.position.set(x, 0.01, 0); o.s.add(ln);
+    const sp = hudSprite(0.05); setText(sp, lab + (sgn < 0 ? " in" : " out")); sp.position.set(x, 0.3, 0); o.s.add(sp); o.ticks.push(sp); }
+  // tok/s scale on the first-token wall for the pillars
+  for (const [v, lab] of [[1,"1 tok/s"],[10,"10"],[100,"100"],[1000,"1K tok/s"]]){
+    const y = rqPillar(v), ln = new THREE.Mesh(new THREE.PlaneGeometry(RQ.MAXL*RQ.LANE + 4, 0.04), new THREE.MeshBasicMaterial({color:0x2a323d, side:THREE.DoubleSide}));
+    ln.rotation.y = Math.PI/2; ln.position.set(0, y, 0); o.s.add(ln);
+    const sp = hudSprite(0.05, 1); setText(sp, lab, null, "right"); sp.position.set(0, y, -(RQ.MAXL*RQ.LANE)/2 - 1.5); o.s.add(sp); }
+  const tin = hudSprite(0.06); setText(tin, "◂ input · prefill", C.sky); tin.position.set(-RQ.X*0.62, 2.6, -(RQ.MAXL*RQ.LANE)/2 - 1.5); o.s.add(tin);
+  const tout = hudSprite(0.06); setText(tout, "generation · output ▸", C.acc); tout.position.set(RQ.X*0.62, 2.6, -(RQ.MAXL*RQ.LANE)/2 - 1.5); o.s.add(tout);
+  o.labels = []; o.lanes = []; o.wait = hudSprite(0.06); o.s.add(o.wait);
+  o.lastFrame = performance.now();
+  S3.reqs = o;
+}
+function drawReqs3(){
+  const o = S3.reqs; if (!o || !place(o)) return;
+  const s = VIZ.sched;
+  if (!s){ o.bars.count = 0; o.rings.count = 0; o.lanes = []; for (const sp of o.labels) sp.visible = false; o.wait.visible = false; $("rq3_list").hidden = true; $("rq3_sub").textContent = "no live requests"; }
+  else if (o.dirty || s.ts !== o.lastTs){
+    o.lastTs = s.ts; o.dirty = false;
+    const reqs = (s.reqs || []).slice().sort((a, b) => (b.age||0) - (a.age||0)).slice(0, RQ.MAXL);   // oldest at the back
+    const n = reqs.length, m = new THREE.Matrix4(), c = new THREE.Color(); let bi = 0, ri = 0;
+    const pitch = RQ.LANE * Math.min(2.2, Math.max(1, 8 / Math.max(n, 1)));   // spread a few lanes out, pack 16
+    const box = (x0, x1, z, h, col, dim) => { const w = Math.max(0.05, Math.abs(x1 - x0)); m.makeScale(w, h, RQ.LANE*0.62); m.setPosition((x0 + x1)/2, h/2, z); o.bars.setMatrixAt(bi, m); c.set(col); if (dim) c.multiplyScalar(dim); o.bars.setColorAt(bi, c); bi++; };
+    o.lanes = reqs.map((r, k) => {
+      const st = r.stats || {}, z = (k - (n - 1)/2) * pitch, pre = r.computed < r.prompt;
+      const Lin = rqLen(r.prompt), cached = Math.min(st.cached || 0, r.prompt), done = Math.min(r.computed, r.prompt);
+      const xc = -Lin * (cached / Math.max(r.prompt, 1)), xd = -Lin * (done / Math.max(r.prompt, 1));
+      if (cached > 0) box(0, xc, z, RQ.H, C.gold, 0.8);
+      box(xc, xd, z, RQ.H, C.sky);
+      if (pre) box(xd, -Lin, z, RQ.H*0.55, "#2a323d");
+      const gen = st.generated ?? Math.max(0, r.total - r.prompt), Lout = rqLen(gen);
+      if (gen > 0) box(0, Lout, z, RQ.H, C.acc);
+      const rate = pre ? st.prefill_tps : st.gen_tps, ph = rqPillar(rate);
+      if (ph) box(-0.35, 0.35, z, ph, pre ? C.sky : C.acc, 0.95);
+      if (!pre && st.tau){ m.makeRotationX(Math.PI/2); m.scale(new THREE.Vector3(0.45 + 0.13*st.tau, 0.45 + 0.13*st.tau, 1)); m.setPosition(0, ph + 0.25, z); o.rings.setMatrixAt(ri++, m); }
+      return {z, pre, Lin, Lout, xd, rate: rate || 0, hue: reqHue(r.id)};
+    });
+    o.bars.count = bi; o.bars.instanceMatrix.needsUpdate = true; if (o.bars.instanceColor) o.bars.instanceColor.needsUpdate = true;
+    o.rings.count = ri; o.rings.instanceMatrix.needsUpdate = true;
+    while (o.labels.length < n){ const sp = hudSprite(0.062, 1); o.s.add(sp); o.labels.push(sp); }
+    o.labels.forEach((sp, k) => { sp.visible = k < n; if (k >= n) return; const r = reqs[k], L = o.lanes[k], w = whoLabel(r);
+      setText(sp, w ? `${r.id} · ${w}` : r.id, `hsl(${Math.round(L.hue*360)},85%,60%)`, "right"); sp.position.set(-L.Lin - 0.6, 0.5, L.z); });   // anchored by its right edge at the input end
+    { const lg = $("rq3_list"); lg.replaceChildren(); reqs.forEach((r, k) => { const row = document.createElement("div"); row.className = "row";
+        const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = `hsl(${Math.round(o.lanes[k].hue*360)},85%,60%)`;
+        const tx = document.createElement("span"); tx.className = "tx"; tx.textContent = rqText(r); row.title = rqText(r); row.append(sw, tx); lg.appendChild(row); });
+      lg.hidden = n === 0; }
+    for (const sp of o.ticks) sp.position.z = (Math.max(n, 1)/2) * pitch + 1.2;   // tick labels just in front of the lanes
+    o.wait.visible = (s.waiting || 0) > 0; if (o.wait.visible){ setText(o.wait, `waiting for a slot ×${s.waiting}`, C.coral); o.wait.position.set(0, 0.6, (n/2)*pitch + 1.6); }
+    const pf = reqs.filter(r => r.computed < r.prompt), dc = reqs.filter(r => r.computed >= r.prompt);
+    const sum = (a, k) => a.reduce((x, r) => x + ((r.stats || {})[k] || 0), 0);
+    $("rq3_sub").textContent = `${n} live · ${pf.length} prefilling ${fmtRate(sum(pf, "prefill_tps"))} tok/s · ${dc.length} generating ${fmtRate(sum(dc, "gen_tps"))} tok/s` + ((s.waiting||0) ? ` · ${s.waiting} waiting` : "") + whoSummary(s);
+  }
+  // particles: into the wall along the input bar while prefilling, out along the output bar while generating
+  const now = performance.now(), dt = Math.min(0.1, (now - o.lastFrame) / 1000); o.lastFrame = now;
+  let pi = 0; const col = new THREE.Color();
+  for (const L of o.lanes){
+    const speed = 0.05 + 0.22 * Math.log10(1 + L.rate), span = L.pre ? Math.max(0.5, -L.xd) : Math.max(0.5, L.Lout);
+    col.set(L.pre ? C.sky : C.acc);
+    for (let j = 0; j < RQ.P; j++, pi++){
+      o.phase[pi] = (o.phase[pi] + dt * speed) % 1; const f = o.phase[pi];
+      const x = L.pre ? -span * (1 - f) : span * f;
+      o.ppos[pi*3] = x; o.ppos[pi*3+1] = RQ.H + 0.12 + 0.45 * ((j * 0.618) % 1); o.ppos[pi*3+2] = L.z + RQ.LANE*0.5*(((j * 0.382) % 1) - 0.5);   // riding just above the bar
+      const a = L.rate ? 1.0 : 0.3; o.pcol[pi*3] = col.r*a; o.pcol[pi*3+1] = col.g*a; o.pcol[pi*3+2] = col.b*a;
+    }
+  }
+  for (let q = pi; q < RQ.MAXL*RQ.P; q++){ o.ppos[q*3+1] = -50; }
+  o.pts.geometry.attributes.position.needsUpdate = true; o.pts.geometry.attributes.color.needsUpdate = true;
+  o.r.render(o.s, o.c);
+}
+/* ---------------- model modes: the served model decides which cortex, panels and frame decoders run ----------------
+   GLM-5.3-Flash (exl3 kit) and MiMo-V2.6-Flash (mimo26 kit) have different architectures and telemetry runtimes; the
+   collector's live profile names the one being served. ?model=glm|mimo overrides; a change of served model reloads. */
+let MD = null, AV = null, MODEL = null;
+const MODEL_OVERRIDE = new URLSearchParams(location.search).get("model");
+const MODEL_UI = {
+  glm: {cx:"cortex — glm-5.3-flash: tokenizer → 45 layers (34 kda · 11 dsa · 42 moe × 288 + shared) → sampler",
+        av:"attention volume — dsa layer × token × context", rt:"residual terrain — layer × time × magnitude",
+        brain:"expert routing — 42 moe layers × 288 experts, top-9", scan:"attention scan — where each dsa layer reads",
+        ribbon:"residual stream — per-layer magnitude", price:"glm53", rtW:46},
+  mimo: {cx:"cortex — mimo-v2.6-flash: 48 layers · 9 global + 39 swa · 47 moe × 256 · draft head",
+         av:"attention heads — layer × token × head", rt:"attention terrain — layer × time × output magnitude",
+         brain:"expert routing — 47 moe layers × 256 experts, top-8", scan:"attention heads — output magnitude, 48 layers × 32 heads",
+         ribbon:"attention output — per-layer magnitude over time", price:"mimo26", rtW:48},
+};
+function servedModel(live){ const n = ((live && live.profile && live.profile.name) || (live && live.model) || "").toLowerCase();
+  return n.startsWith("glm") ? "glm" : n.startsWith("mimo") ? "mimo" : null; }
+function pickModel(){
+  const m = (MODEL_OVERRIDE === "glm" || MODEL_OVERRIDE === "mimo") ? MODEL_OVERRIDE : servedModel(LIVE);
+  if (!m) return;
+  if (MODEL && m !== MODEL){ location.reload(); return; }   // the served model changed under an open page
+  if (MODEL) return;
+  MODEL = m; MD = m === "glm" ? MD_GLM : MD_MIMO; AV = m === "glm" ? AV_GLM : AV_MIMO; const u = MODEL_UI[m]; RT.W = u.rtW;
+  for (const [id, k] of [["cx_title","cx"],["av_title","av"],["rt_title","rt"],["brain_title","brain"],["scan_title","scan"],["ribbon_title","ribbon"]]) $(id).textContent = u[k];
+  let picked = null; try { picked = localStorage.getItem("price_pick"); } catch(e){}
+  if (!picked) $("apiSel").value = u.price;
+  renderSaved(); document.body.dataset.model = m;
+}
+function ingestAct(a){ return a.head_means ? ingestActMiMo(a) : ingestActGLM(a); }   // decode by what the runtime sent
+function drawBrain(){ return MODEL === "glm" ? drawBrainGLM() : drawBrainMiMo(); }
+function drawScan(){ return MODEL === "glm" ? drawScanGLM() : drawScanMiMo(); }
+function drawRibbon(){ return MODEL === "glm" ? drawRibbonGLM() : drawRibbonMiMo(); }
+function initCortex(){ return MODEL === "glm" ? initCortexGLM() : initCortexMiMo(); }
+function drawCortex(){ return MODEL === "glm" ? drawCortexGLM() : drawCortexMiMo(); }
+function initAttn(){ return MODEL === "glm" ? initAttnGLM() : initAttnMiMo(); }
+function drawAttn(){ return MODEL === "glm" ? drawAttnGLM() : drawAttnMiMo(); }
+/* ---- GLM-5.3-Flash mode (restored from the pre-MiMo dashboard, adapted to the shared helpers) ---- */
+/* cortex: the model itself. GLM-5.3-Flash drawn as a 45-layer tower: tokenizer/embedding at the bottom, then per layer the
+   attention block (34 KDA linear-attention layers as head plates, 11 DSA sparse-attention layers as context bars) and the MLP
+   (3 dense plates, then 42 MoE plates of 24x12 = 288 experts + 1 shared), the LM head/sampler on top and the MTP draft layer
+   beside it. Strands are this step's tokens (colour = request) through the experts they were routed to; rays are where the DSA
+   layers read in the context; the spine is the residual-stream magnitude per layer. Counts only: no token ids or text. */
+const MD_GLM = (() => {
+  const dsa = [3,7,11,15,19,23,27,31,35,39,43];
+  const kda = []; for (let l=0;l<45;l++) if (!dsa.includes(l)) kda.push(l);
+  return {L:45, dsa, kda, kdaSet:new Set(kda), dense:new Set([0,1,2]), E:288, cols:24, K:9, DY:0.95, W:12, D:6,
+          yOf: l => l*0.95, yEmb:-3.2, yHead:45*0.95+1.4, xMtp:12.5, zAttn:-4.8, xSpine:-7.8,
+          moeLayer: o => o < 42 ? 3+o : -1, dsaLayer: o => o < 11 ? dsa[o] : -1, tokX0:-6, tokW:12, logRib:false};
+})();
+const plateOrigin = o => o < 42 ? {x:0, y:MD.yOf(3+o), z:0} : {x:MD.xMtp, y:MD.yHead, z:0};      // routing ordinal 42 = MTP layer
+const binX = b => (b-31.5)*0.19;
+function initCortexGLM(){
   const o = mk3("cv3_cortex"); if (!o) return; o.rad = o.rad0 = 66; o.theta = 0.62; o.phi = 1.28; o.target.set(1.0, MD.yOf(21), -1.0); S3.cortex = o;
   const m = new THREE.Matrix4(), dim = new THREE.Color(0.012,0.016,0.022);
   const inst = (geo, n, opacity=0.9) => { const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity, depthWrite:true}), n);   // solid plates: occlude, do not add
@@ -909,19 +1315,18 @@ function initCortex(){
   const lab = (text, x, y, z, sx=13, sy=0.95, align) => { const sp = textSprite(sx, sy); setText(sp, text, null, align); sp.position.set(x,y,z); o.s.add(sp); return sp; };
   lab("tokenizer → embedding", -6.5, MD.yEmb-1.0, 4.0, 16, 1.15);
   lab("LM head → sampler", -6.5, MD.yHead+1.1, 4.0, 16, 1.15);
-  lab("MTP draft layer (×4)", MD.xMtp, MD.yHead+1.6, 3.2, 14, 1.05);
+  o.mtpLabel = lab("MTP draft layer", MD.xMtp, MD.yHead+1.6, 3.2, 18, 1.05);
   lab("residual stream", MD.xSpine-1.5, MD.yOf(45)+0.6, 0, 12, 0.95);
   lab("attention: kda heads / dsa context bins", 0, MD.yOf(45)+0.6, MD.zAttn, 20, 1.05);
   for (let l=0;l<45;l+=5) lab(`L${l} · ${MD.kdaSet.has(l) ? "kda" : "dsa"} + ${MD.dense.has(l) ? "dense" : "moe"}`, -13.5, MD.yOf(l), 0, 13, 1.0);
   o.tin = []; o.tout = [];      // token-text sprites (per request), created on demand
 }
-function poolText3(o, list, n, y0, dir, x, z){ while (list.length < n){ const sp = textSprite(30, 1.7); o.s.add(sp); list.push(sp); } list.forEach((sp,i)=>{ sp.visible = i < n; if (i < n) sp.position.set(x, y0 + dir*(2.4 + i*1.7), z); }); }
-function drawCortex(){
+function drawCortexGLM(){
   const o = S3.cortex; if (!o || !place(o)) return;
   const a = VIZ.a3;
   if (o.dirty && a){
     const T = a.T3, TA = a.TA, K = MD.K, nMoe = Math.min(a.n_moe, 43), nMla = Math.min(a.n_mla, 12), c = new THREE.Color(), rgb = [0,0,0];
-    const hues = tokenReqHue(a), hueOf = t => hues[t] || c.setHSL((t/Math.max(T,1))*0.85, 0.9, 0.6).clone();
+    const hues = tokenReqHue(a.reqs, Math.max(a.T3, a.TA)), hueOf = t => hues[t] || c.setHSL((t/Math.max(T,1))*0.85, 0.9, 0.6).clone();
     // --- experts + shared: decay then add this step's routing
     for (let i=0;i<o.hist.length;i++) o.hist[i] *= 0.82; for (let l=0;l<43;l++) o.shist[l] *= 0.82;
     for (let l=0;l<nMoe;l++) for (let t=0;t<T;t++) for (let k=0;k<K;k++){ const e = a.r3[(l*T+t)*K+k]; if (e < 0) continue; if (e < MD.E) o.hist[l*MD.E+e] = Math.min(1, o.hist[l*MD.E+e] + 0.35); else o.shist[l] = Math.min(1, o.shist[l] + 0.2); }
@@ -963,6 +1368,7 @@ function drawCortex(){
         seg(px,py,pz, xt*0.5, MD.yHead, 0, hc, 0.9);
         if (nMoe > 42){ const e = a.r3[(42*T+t)*K+k]; if (e >= 0 && e < MD.E){ const [x,z] = cellXZ(e); seg(xt*0.5, MD.yHead, 0, MD.xMtp+x, MD.yHead, z, hc, 0.5); } } } }
     o.strands.geometry.setDrawRange(0, ns*2); o.strands.geometry.attributes.position.needsUpdate = true; o.strands.geometry.attributes.color.needsUpdate = true;
+    { const dr = (LIVE && LIVE.drafter) || null; setText(o.mtpLabel, dr ? `${dr.method.toUpperCase()} draft layer · ${dr.k} draft tokens / step` : "MTP draft layer", null); }
     // --- per-request counts only (no token ids or text ever reach the page): tokens entering this step, tokens accepted by the sampler
     const tin = (a.reqs||[]).map(([id,s,n]) => [id, `${id} · ${n} tok in`]);
     const tout = (a.acc||[]).map(([id,n]) => [id, `${id} · ${n} accepted`]);
@@ -975,8 +1381,8 @@ function drawCortex(){
   o.r.render(o.s, o.c);
 }
 /* attention volume: points at (context bin, token, layer) */
-const AV = {L:13, T:16, B:64};
-function initAttn(){
+const AV_GLM = {L:13, T:16, B:64};
+function initAttnGLM(){
   const o = mk3("cv3_attn"); if (!o) return; o.rad = o.rad0 = 48; o.theta = 0.9; o.target.set(0, 0, -(AV.L-1)*1.0);
   const n = AV.L*AV.T*AV.B, pos = new Float32Array(n*3), col = new Float32Array(n*3);
   for (let l=0;l<AV.L;l++) for (let t=0;t<AV.T;t++) for (let b=0;b<AV.B;b++){ const i=(l*AV.T+t)*AV.B+b; pos[i*3]=(b-(AV.B-1)/2)*0.5; pos[i*3+1]=(t-(AV.T-1)/2)*1.1; pos[i*3+2]=-l*2.0; }
@@ -984,108 +1390,65 @@ function initAttn(){
   o.pts = new THREE.Points(g, new THREE.PointsMaterial(addMat({vertexColors:true, size:0.42, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
   o.acc = new Float32Array(n); S3.attn = o;
 }
-function drawAttn(){
+function drawAttnGLM(){
   const o = S3.attn; if (!o || !place(o)) return;
   if (o.dirty && VIZ.a3){ const a = VIZ.a3, L=Math.min(a.n_mla, AV.L), T=a.TA, B=a.bins, col=o.pts.geometry.attributes.color.array;
     for (let i=0;i<o.acc.length;i++){ o.acc[i]*=0.6; if (o.acc[i]<0.05) o.acc[i]=0; }
     for (let l=0;l<L;l++) for (let t=0;t<T;t++) for (let b=0;b<B&&b<AV.B;b++){ const v=a.at[(l*T+t)*B+b]/255; const i=(l*AV.T+t)*AV.B+b; if (v>o.acc[i]) o.acc[i]=v; }
-    const tr = tokenReqHue(a); for (let i=0;i<o.acc.length;i++){ const v=o.acc[i] < 0.12 ? 0 : o.acc[i]; const t=Math.floor(i/AV.B)%AV.T; const hc = tr[t]; col[i*3]=(hc?hc.r:0.32)*v; col[i*3+1]=(hc?hc.g:0.72)*v; col[i*3+2]=(hc?hc.b:1.0)*v; }
+    const tr = tokenReqHue(a.reqs, Math.max(a.T3, a.TA)); for (let i=0;i<o.acc.length;i++){ const v=o.acc[i] < 0.12 ? 0 : o.acc[i]; const t=Math.floor(i/AV.B)%AV.T; const hc = tr[t]; col[i*3]=(hc?hc.r:0.32)*v; col[i*3+1]=(hc?hc.g:0.72)*v; col[i*3+2]=(hc?hc.b:1.0)*v; }
     o.pts.geometry.attributes.color.needsUpdate = true; $("av_sub").textContent = `${L} mla layers · ${T} tokens · ${B} context bins`; o.dirty=false; }
   o.r.render(o.s, o.c);
 }
 /* activation space: hidden-state trajectories */
-function initSpace(){
-  const o = mk3("cv3_space"); if (!o) return; o.rad = o.rad0 = 34; o.phi = 1.0;
-  const N = 32*90; const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*3),3)); pg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*3),3));
-  o.pts = new THREE.Points(pg, new THREE.PointsMaterial(addMat({vertexColors:true, size:1.1, sizeAttenuation:true}))); o.pts.frustumCulled=false; o.s.add(o.pts);
-  const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N*2*3),3)); lg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(N*2*3),3));
-  o.trails = new THREE.LineSegments(lg, new THREE.LineBasicMaterial(addMat({vertexColors:true, opacity:0.55}))); o.trails.frustumCulled=false; o.s.add(o.trails);
-  const ax = new THREE.BufferGeometry(); ax.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-14,0,0,14,0,0, 0,-14,0,0,14,0, 0,0,-14,0,0,14]),3)); o.s.add(new THREE.LineSegments(ax, new THREE.LineBasicMaterial({color:0x1e242c})));
-  S3.space = o;
+function ingestActGLM(a){
+  const L = a.n_moe, E = 288, hist = b64u16(a.routing);
+  if (!VIZ.brain || VIZ.brain.length !== L*E) VIZ.brain = new Float32Array(L*E);
+  const B = VIZ.brain, T = Math.max(1, a.T);
+  for (let i=0;i<L*E;i++){ const v = hist[i] / (T*9/E*4); B[i] = Math.max(B[i]*0.82, Math.min(1, v)); }   // decay + normalize
+  const S = b64u8(a.attn), LM = a.n_mla;
+  if (!VIZ.scan || VIZ.scan.length !== LM*256) VIZ.scan = new Float32Array(LM*256);
+  for (let i=0;i<LM*256;i++) VIZ.scan[i] = Math.max(VIZ.scan[i]*0.80, S[i]/255);
+  VIZ.rib.push(a.ribbon.slice(0, a.n_all)); if (VIZ.rib.length > 240) VIZ.rib.shift();
+  VIZ.act = a; for (const sc of Object.values(S3)) sc.dirty = true;
 }
-function drawSpace(){
-  const o = S3.space; if (!o || !place(o)) return;
-  if (o.dirty && VIZ.space.length){ const st = VIZ.spaceStat, H = VIZ.space, pos=o.pts.geometry.attributes.position.array, col=o.pts.geometry.attributes.color.array, lp=o.trails.geometry.attributes.position.array, lc=o.trails.geometry.attributes.color.array;
-    const nrm = (x,k)=> Math.max(-14, Math.min(14, (x-st.m[k])/Math.sqrt(st.v[k]+1e-6)*5.5)); let n=0, s=0; const rgb=[0,0,0];
-    for (let h=0;h<H.length;h++){ const age = 1-(h/(H.length-1||1)), f=H[h], T=f.T;
-      const trh = f.hues; for (let t=0;t<T;t++){ const x=nrm(f.p[t*3],0), y=nrm(f.p[t*3+1],1), z=nrm(f.p[t*3+2],2); if (trh && trh[t]){ rgb[0]=trh[t].r; rgb[1]=trh[t].g; rgb[2]=trh[t].b; } else tokenHue(t, T, rgb); const w=Math.pow(1-age, 1.5)*0.9+0.05;
-        pos.set([x,y,z], n*3); col.set([rgb[0]*w, rgb[1]*w, rgb[2]*w], n*3); n++;
-        if (h>0 && t<H[h-1].T){ const g=H[h-1]; lp.set([nrm(g.p[t*3],0),nrm(g.p[t*3+1],1),nrm(g.p[t*3+2],2), x,y,z], s*6); lc.set([rgb[0]*w*0.6,rgb[1]*w*0.6,rgb[2]*w*0.6, rgb[0]*w,rgb[1]*w,rgb[2]*w], s*6); s++; } } }
-    o.pts.geometry.setDrawRange(0,n); o.trails.geometry.setDrawRange(0,s*2);
-    for (const g of [o.pts.geometry, o.trails.geometry]){ g.attributes.position.needsUpdate=true; g.attributes.color.needsUpdate=true; }
-    $("as_sub").textContent = `${H[H.length-1].T} tokens · ${H.length} steps of trail`; o.dirty=false; }
-  o.r.render(o.s, o.c);
+function drawBrainGLM(){
+  const c = cvctx("cv_brain"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.brain){ idleText(ctx,W,H,"expert routing appears here once the engine hooks are live"); return; }
+  const L = VIZ.act.n_moe, E = 288, cw = W/E, ch = H/L;
+  for (let l=0;l<L;l++) for (let e=0;e<E;e++){ const v = VIZ.brain[l*E+e]; if (v>0.02){ ctx.fillStyle = heat(v); ctx.fillRect(e*cw, l*ch, Math.max(cw,1), Math.max(ch-0.5,1)); } }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("layer 0", 4, 10); ctx.fillText("layer "+(L-1), 4, H-4);
+  ctx.textAlign="right"; ctx.fillText("expert 287 →", W-4, H-4);
+  // hot experts
+  const load = new Float32Array(E); for (let l=0;l<L;l++) for (let e=0;e<E;e++) load[e]+=VIZ.brain[l*E+e];
+  const top = [...load.keys()].sort((a,b)=>load[b]-load[a]).slice(0,5);
+  $("brain_sub").textContent = "hot: " + top.map(e=>"#"+e).join(" ");
 }
-/* residual terrain: heightfield over (layer, time) */
-const RT = {W:46, D:120};
-function initTerrain(){
-  const o = mk3("cv3_terrain"); if (!o) return; o.rad = o.rad0 = 70; o.theta = 0.35; o.phi = 1.05; o.target.set(0, 3, -RT.D*0.5*0.5); o.auto = false;
-  const n = RT.W*RT.D, pos = new Float32Array(n*3), col = new Float32Array(n*3), idx = [];
-  for (let d=0; d<RT.D; d++) for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; pos[i*3]=(w-(RT.W-1)/2)*0.9; pos[i*3+1]=0; pos[i*3+2]=-d*0.5; }
-  for (let d=0; d<RT.D-1; d++) for (let w=0; w<RT.W-1; w++){ const a=d*RT.W+w, b=a+1, c=a+RT.W, e=c+1; idx.push(a,c,b, b,c,e); }
-  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos,3)); g.setAttribute("color", new THREE.BufferAttribute(col,3)); g.setIndex(idx);
-  o.mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, side:THREE.DoubleSide, transparent:true, opacity:0.85})); o.s.add(o.mesh);
-  o.wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:0xc8f542, wireframe:true, transparent:true, opacity:0.12})); o.s.add(o.wire);
-  S3.terrain = o;
+function drawScanGLM(){
+  const c = cvctx("cv_scan"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.scan){ idleText(ctx,W,H,"attention positions appear here once the engine hooks are live"); return; }
+  const LM = VIZ.act.n_mla, bw = W/256, lh = H/LM;
+  for (let l=0;l<LM;l++){
+    for (let b=0;b<256;b++){ const v = VIZ.scan[l*256+b]; if (v>0.03){ ctx.fillStyle = `rgba(82,183,255,${Math.min(1,0.15+v)})`; ctx.fillRect(b*bw, l*lh+1, Math.max(bw,1), lh-2); } }
+    ctx.fillStyle="#1e242c"; ctx.fillRect(0, l*lh, W, 1);
+  }
+  ctx.fillStyle="#4a5462"; ctx.font="500 9.5px 'IBM Plex Mono'"; ctx.textAlign="left"; ctx.fillText("start of context", 4, H-5); ctx.textAlign="right"; ctx.fillText("now", W-4, H-5);
 }
-function drawTerrain(){
-  const o = S3.terrain; if (!o || !place(o)) return;
-  if (o.dirty && VIZ.rib.length){ const H = VIZ.rib.slice(-RT.D), pos=o.mesh.geometry.attributes.position.array, col=o.mesh.geometry.attributes.color.array; let mx=1e-6; for (const r of H) for (const v of r) if (v>mx) mx=v;
-    for (let d=0; d<RT.D; d++){ const r = H[H.length-1-d]; for (let w=0; w<RT.W; w++){ const i=d*RT.W+w; const v = r && w<r.length ? r[w]/mx : 0; pos[i*3+1] = v*9; const t=Math.pow(v,0.8); col[i*3]=0.08+0.7*t; col[i*3+1]=0.16+0.8*t; col[i*3+2]=0.2+0.05*t; } }
-    o.mesh.geometry.attributes.position.needsUpdate=true; o.mesh.geometry.attributes.color.needsUpdate=true; o.mesh.geometry.computeBoundingSphere();
-    $("rt_sub").textContent = `${H.length} steps · peak layer ${H[H.length-1].indexOf(Math.max(...H[H.length-1]))}`; o.dirty=false; }
-  o.r.render(o.s, o.c);
-}
-/* kv rack: requests as rows of blocks */
-// Pool occupancy in page IDs (hybrid layout: MLA + KDA groups share one pool). "cached" pages are the prefix
-// cache; when free hits 0 the next prefill evicts the least recently used session.
-function poolText(s){ if (s.blocks_total == null) return ""; const inuse = s.blocks_total - (s.blocks_evictable ?? 0);
-  return ` · pool ${s.blocks_total} pages: ${inuse} in use · ${s.blocks_cached ?? "?"} cached · ${s.blocks_free ?? "?"} free${s.groups ? ` · ${s.groups} groups` : ""}`; }
-const fmtK = v => v >= 1e6 ? (v/1e6).toFixed(2)+"M" : v >= 1e3 ? Math.round(v/1e3)+"K" : String(v);
-// KV capacity in tokens = the engine's "GPU KV cache size" (all cache groups), relayed by the collector.
-const kvTotal = () => (LIVE && LIVE.kv_total_tokens) || null;
-function kvUsedText(s){ const tot = kvTotal(), pct = (s.usage*100); return tot ? `${fmtTok(s.usage*tot)} of ${fmtTok(tot)} tokens used · ${pct.toFixed(1)}%` : `${pct.toFixed(1)}% used`; }
-function kvTitle(base){ const tot = kvTotal(); return tot ? `${base} — ${fmtTok(tot)} tokens` : base; }
-function reqLabel(r){ return r.computed < r.prompt ? `${r.id} · ${fmtK(r.computed)}/${fmtK(r.prompt)} · prefill ${Math.round(100*r.computed/Math.max(r.prompt,1))}%` : `${r.id} · ${fmtK(r.total)} ctx · generating`; }
-function labelSprite(){ const cv = document.createElement("canvas"); cv.width = 512; cv.height = 64; const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false})); sp.scale.set(15, 1.9, 1); sp.userData = {cv, tex, text: ""}; return sp; }
-function setLabel(sp, text, col){ if (sp.userData.text === text && sp.userData.col === col) return; const {cv, tex} = sp.userData, g = cv.getContext("2d");
-  g.clearRect(0,0,cv.width,cv.height); g.fillStyle = "rgba(11,13,16,0.75)"; g.fillRect(0, 8, cv.width, 48); g.fillStyle = col; g.fillRect(10, 22, 18, 18);
-  g.font = "600 26px 'IBM Plex Mono', monospace"; g.fillStyle = "#e8eef4"; g.textBaseline = "middle"; g.fillText(text, 40, 32); tex.needsUpdate = true; sp.userData.text = text; sp.userData.col = col; }
-function initKV3(){
-  const o = mk3("cv3_kv"); if (!o) return; o.rad = o.rad0 = 40; o.theta = 0.5; o.phi = 1.0; o.target.set(0, 0, -8);
-  o.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8,1,0.8), new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.95}), 8*96);
-  o.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(8*96*3), 3);   // must exist before the first render or the shader ignores per-instance colour
-  o.mesh.count = 0; o.s.add(o.mesh);
-  const fl = new THREE.Mesh(new THREE.PlaneGeometry(96, 20), new THREE.MeshBasicMaterial({color:0x12161c, side:THREE.DoubleSide})); fl.rotation.x = -Math.PI/2; fl.position.set(0,-0.81,-8); o.s.add(fl);
-  o.labels = [];
-  S3.kv = o;
-}
-function drawKV3(){
-  const o = S3.kv; if (!o || !place(o)) return;
-  const s = VIZ.sched; if (s && (o.dirty || s.ts !== o.lastTs)){ o.lastTs = s.ts; const pool = s.pool_tokens || 2146153, pal=[C.acc,C.sky,C.coral,C.lav,C.gold,C.teal,C.pink,"#9db4ff"]; const m=new THREE.Matrix4(), c=new THREE.Color(); let n=0;
-    (s.reqs||[]).slice(0,8).forEach((r,k)=>{ const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))), done=Math.round(nb*r.computed/Math.max(r.total,1)); const z=-(k-3.5)*2.2;
-      for (let i=0;i<nb&&n<768;i++){ const isHead = (r.computed<r.prompt && i===done), h = i<done ? 1.8 : 0.5; m.makeScale(1, isHead?2.6:h, 1); m.setPosition((i-(nb-1)/2)*0.95, (isHead?2.6:h)/2-0.8, z); o.mesh.setMatrixAt(n, m); c.set(pal[k%8]); if (i>=done && !isHead) c.multiplyScalar(0.3); if (isHead) c.set(0xffffff); o.mesh.setColorAt(n, c); n++; } });
-    o.mesh.count = n; o.mesh.instanceMatrix.needsUpdate = true; if (o.mesh.instanceColor) o.mesh.instanceColor.needsUpdate = true;
-    // one floating label per request row: id · computed/prompt · prefill % (or generating)
-    const reqs = (s.reqs||[]).slice(0,8);
-    while (o.labels.length < reqs.length){ const sp = labelSprite(); o.s.add(sp); o.labels.push(sp); }
-    while (o.labels.length > reqs.length){ const sp = o.labels.pop(); o.s.remove(sp); }
-    reqs.forEach((r,k)=>{ const sp = o.labels[k]; const nb=Math.max(1, Math.min(96, Math.round(96*r.total/pool*4))); setLabel(sp, reqLabel(r), pal[k%8]); sp.position.set(0, 2.9 + k*1.5, -(k-3.5)*2.2); });   // stacked above the rack so they never overlap
-    { const lg = $("kv3_legend"); if (lg){ lg.replaceChildren(); reqs.forEach((r,k)=>{ const row = document.createElement("div"); row.className = "row";
-        const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = pal[k%8];
-        const tx = document.createElement("span"); tx.textContent = reqLabel(r);
-        const bar = document.createElement("span"); bar.className = "bar"; const fill = document.createElement("span"); fill.className = "fill"; fill.style.background = pal[k%8];
-        fill.style.width = (r.computed < r.prompt ? Math.round(100*r.computed/Math.max(r.prompt,1)) : 100) + "%"; bar.appendChild(fill);
-        row.append(sw, tx, bar); lg.appendChild(row); }); lg.hidden = reqs.length === 0; } }
-    $("kv3_sub").textContent = kvUsedText(s) + ` · ${(s.reqs||[]).length} live · ${s.waiting} waiting` + poolText(s); $("kv3_title").textContent = kvTitle("kv pool — requests × blocks"); o.dirty=false; }
-  o.r.render(o.s, o.c);
+function drawRibbonGLM(){
+  const c = cvctx("cv_ribbon"); if(!c) return; const {ctx,W,H} = c; ctx.fillStyle="#0b0d10"; ctx.fillRect(0,0,W,H);
+  if (!VIZ.rib.length){ idleText(ctx,W,H,"residual-stream magnitude per layer appears here once hooks are live"); return; }
+  const N = VIZ.rib[0].length, n = VIZ.rib.length; let mx = 1e-6; for (const r of VIZ.rib) for (const v of r) if (v>mx) mx=v;
+  const cw = W/Math.max(n, 60), lh = H/N;   // stretch until ~5s of history exists
+  for (let i=0;i<n;i++){ const r = VIZ.rib[i], x = W - (n-i)*cw;
+    for (let l=0;l<N;l++){ const v = r[l]/mx; ctx.fillStyle = `rgba(200,245,66,${0.08+0.9*v*v})`; ctx.fillRect(x, l*lh, cw+0.5, lh-0.4); } }
+  const last = VIZ.rib[n-1]; let hi=0; for (let l=0;l<N;l++) if (last[l]>last[hi]) hi=l;
+  $("ribbon_sub").textContent = `peak layer ${hi} · ${last[hi].toFixed(1)}`;
 }
 let init3done = false;
 function draw3D(){
   if (!window.THREE){ $("cx_sub").textContent = "three.js failed to load"; return; }
-  if (!init3done){ init3done = true; initCortex(); initAttn(); initSpace(); initTerrain(); initKV3(); }
-  drawCortex(); drawAttn(); drawSpace(); drawTerrain(); drawKV3();
+  if (!MODEL){ $("cx_sub").textContent = "waiting for the server's model…"; return; }
+  if (!init3done){ init3done = true; initCortex(); initAttn(); initSpace(); initTerrain(); initKV3(); initReqs3(); }
+  drawCortex(); drawAttn(); drawSpace(); drawTerrain(); drawKV3(); drawReqs3();
 }
 function setMode(three){ VIZ.three = three; localStorage.setItem("viz_mode", three?"3d":"2d"); $("mode_btn").textContent = three?"3D":"2D"; $("mode_btn").className = "mode"+(three?" on":""); $("agrid3d").hidden = !three; $("agrid").hidden = three; for (const sc of Object.values(S3)) sc.dirty = true; }
 $("mode_btn").onclick = ()=> setMode(!VIZ.three);

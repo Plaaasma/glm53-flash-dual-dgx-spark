@@ -1,0 +1,166 @@
+glm53-tensorfold-spark
+Copyright 2026 Jay Leaton (https://x.com/jayleaton)
+
+This project's own code, scripts, benchmarks and documentation are licensed under the Apache License,
+Version 2.0 (see LICENSE). If you redistribute this project or a modified version of it, keep this NOTICE
+file and the copyright line above, and state what you changed (Apache-2.0, section 4).
+
+This project builds on third-party work that keeps its own license:
+
+TensorFold
+  https://github.com/ashhart/TensorFold
+  Copyright (c) 2026 TensorFold contributors. MIT License.
+  Included as the unmodified git submodule vendor/TensorFold (pinned at 2f8e514). The files in patches/ are
+  modifications of TensorFold source; they are applied at image build time. TensorFold's license text is in
+  vendor/TensorFold/LICENSE, and its own third-party notices are in vendor/TensorFold/THIRD_PARTY_NOTICES.md
+  and vendor/TensorFold/LICENSES/. The changes in patches/ are this project's work under Apache-2.0; the
+  TensorFold code they modify, and quote as diff context, stays under TensorFold's MIT License, so keep
+  TensorFold's copyright and permission notice with any copy of a patched tree.
+  patches/0600-glm-upstream-ports.patch ports code from later upstream TensorFold releases (0.3.6.2 and
+  0.5.0, commits 24afe5e, 2bc35c4, a586f3d, 391713e / 05cbb54 / b4042e8, e6be5ff, 88407d1, c30a1a9,
+  51b098d / c4bf25f; same MIT License, Copyright (c) 2026 TensorFold contributors): server/cancellation.py,
+  glm5_next/cuda/image_fetch.py (from vision/images_http.py), closed_json, parse_numbers and the /health
+  totals; each ported piece names its source commit, and docs/UPSTREAM-PORTS.md lists our changes to them.
+  Those ported pieces stay under TensorFold's MIT License.
+
+GLM-5.3-Flash EXL3 2x DGX Spark serving kits (patches/0170)
+  Reederey87/glm53-flash-exl3-2x-dgx-spark (https://github.com/Reederey87/glm53-flash-exl3-2x-dgx-spark,
+  commit 6c337d2), Apache License 2.0, itself based on the kit by Mia's AI Lab
+  (https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks), MIT License for the contributions made
+  before 2026-09-07 (Copyright (c) 2026 Mia's AI Lab; the repository is AGPL-3.0 since then). The "fat"
+  expert kernels in patches/0170-glm-mia-prefill.patch (exl3_fast.cu, namespace fat) adapt the structure of
+  that kit's grouped fat-expert MoE (overlay/exl3_fat_moe.cu, added to MiaAI-Lab's repository on 2026-09-07
+  before the relicense and adopted by Reederey87's kit: cp.async-staged trellis tiles, gate/up sharing one
+  rotated input, XOR-swizzled A stages, the ticket scheduler); the arithmetic is this project's own
+  (patches/0080). Reederey87's NOTICE file is reproduced below, as Apache-2.0 section 4(d) asks.
+  The KDA bf16 projection copy in the same patch re-implements the idea of MiaAI-Lab PR #233 (AGPL-3.0)
+  without its code (credit for the idea only).
+  Other ideas taken from the MiaAI-Lab kit (canary, preflight, memory gate, watchdog, /health, reasoning
+  effort; patches/0150 and scripts/) are re-implemented, not copied; docs/MIA-AUDIT.md lists each one.
+
+b12x "RoCEnante" RoCE collectives (patches/0230)
+  local-inference-lab/b12x (https://github.com/local-inference-lab/b12x, b12x/comm/roce/, merged PRs #295
+  and #315, with the fixes of PR #438), Copyright 2026 Luke Alonso and the b12x contributors, Apache License
+  2.0 (text: vendor/TensorFold/LICENSES/Apache-2.0.txt; b12x ships no NOTICE file). The one-shot RoCE
+  all-gather in patches/0230-glm-roce-gather.patch (glm5_next/cuda/roce.cpp, roce.cu, roce_common.h, roce.py)
+  adapts its RDMA proxy (_roce_proxy.c), its all-gather kernel and PTX intrinsics (_allgather_cute.py,
+  _cute_intrinsics.py) and its runtime's protocol (roce_oneshot.py); the changes are listed in the patch's
+  file headers and in vendor/TensorFold/THIRD_PARTY_NOTICES.md as patched.
+
+b12x fast-prefill kernels (patches/0240)
+  local-inference-lab/b12x (https://github.com/local-inference-lab/b12x, commit d44247b6: b12x/norm/mhc,
+  b12x/sequence/kda_prefill with b12x/sequence/_shared/delta_prefill, b12x/attention/sparse_mla), Copyright 2026
+  Luke Alonso and the b12x contributors, Apache License 2.0 (text: vendor/TensorFold/LICENSES/Apache-2.0.txt; b12x
+  ships no NOTICE file). The Triton kernels in patches/0240-glm-b12x-prefill.patch (glm5_next/cuda/b12x_kda.py,
+  b12x_mhc.py, b12x_attn.py) re-implement algorithms and kernel structures of those b12x ops (the 16-token KDA tile
+  with its Neumann-product inverse and on-chip fp32 state; the fused hyper-connection post + mixing dots over column
+  blocks of all four streams; the one-pass-per-row sparse MLA softmax) on this project's arithmetic; no b12x code is
+  copied. The changes are listed in the files' headers and in vendor/TensorFold/THIRD_PARTY_NOTICES.md as patched.
+
+kindlingai/glm-5.3-flash-gx10 (ideas only; patches/0590 and the W19 NCCL setting)
+  https://github.com/kindlingai/glm-5.3-flash-gx10 (read at 45b438b). The repository has no licence, so no code or
+  kernel from it is included: patches/0590-glm-expert-prefill-v2.patch (exl3_fat2.cu) re-implements the structure of
+  its fused prefill MoE kernel on this project's arithmetic, and NCCL over both CX7 functions follows its notes
+  (credit for the ideas only; docs/KINDLING-AUDIT.md).
+
+log / exp of ARM Optimized Routines as built into glibc 2.39 (patches/0450)
+  patches/0450-glm-gpu-round.patch (glm5_next/cuda/gpusample.py) re-implements, for the GPU, the float64 log and
+  exp that numpy calls on aarch64: glibc 2.39's __log / __exp (sysdeps/ieee754/dbl-64/e_log.c, e_exp.c), which come
+  from ARM's Optimized Routines (https://github.com/ARM-software/optimized-routines, math/log.c, math/exp.c;
+  Copyright (c) Arm Limited; MIT OR Apache-2.0 WITH LLVM-exception). The algorithm and its coefficient / lookup
+  tables (e_log_data.c / e_exp_data.c, read from Ubuntu's libm.so.6 2.39-0ubuntu8.9 binary and equal to those
+  sources) are reproduced so that the GPU sampler's bits equal the host's; the instruction order follows the
+  binary. tests/libm_a64.py compares against that binary, which each user downloads.
+
+Public text behind the shipped draft vocabulary ranking (patches/0420)
+  The token ranking draft_vocab.txt in patches/0420-glm-draft-vocab.patch holds token ids ordered by frequency,
+  counted by bench/draftvocab_public.py in: OpenAssistant/oasst1 (Apache-2.0), SWE-Gym/OpenHands-SFT-Trajectories
+  (MIT), CPython 3.14.7 Lib/ and Doc/ (PSF License 2.0), denoland/std (MIT) and BurntSushi/ripgrep 14.1.1 (MIT OR
+  Unlicense), at the revisions pinned in that script. No text of these sources is included, only token counts'
+  order.
+
+NVIDIA PyTorch container (nvcr.io/nvidia/pytorch:26.07-py3)
+  The Docker image is built FROM this container and is subject to the NVIDIA Deep Learning Container
+  License. PyTorch (BSD-3-Clause) and Triton (MIT) come from it.
+
+xgrammar (patches/0610, structured output)
+  mlc-ai/xgrammar 0.2.8 (https://github.com/mlc-ai/xgrammar), Copyright the MLC team, Apache License 2.0
+  (text: vendor/TensorFold/LICENSES/Apache-2.0.txt). Installed into the image by docker/Dockerfile with pip,
+  with its dependencies apache-tvm-ffi (Apache-2.0), pydantic (MIT) and transformers (Apache-2.0); not
+  vendored. patches/0610-glm-structured-output.patch (glm5_next/cuda/grammar.py) calls its compiler, matcher
+  and built-in GLM-4.7 / GLM-5 tool-call structural tag. The same file ports code from upstream TensorFold
+  0.5.0 (src/tensorfold/engine/grammar.py, commits 98fb8f9 and 1da4b7e; MIT License, Copyright (c) 2026
+  TensorFold contributors), named in its header.
+
+Not included; each user downloads these under their own terms:
+
+GLM-5.3-Flash abliterated EXL3 weights
+  neko-legends/GLM-5.3-Flash-Uncensored-EXL3 (revision 07135ec0)
+  https://huggingface.co/neko-legends/GLM-5.3-Flash-Uncensored-EXL3
+  Quantized by neko-legends from orcarouter/GLM-5.3-Flash-Uncensored-FP8 (MIT per its model card), which is
+  derived from Z.ai's GLM-5.3-Flash (zai-org/GLM-5.3-Flash, MIT per its model card). The EXL3 checkpoint's
+  model card names the license "shapleymcg-license-1.0"
+  (https://github.com/brandonmmusic-max/shapleymcg/blob/main/LICENSE, the Local Inference Lab Attribution
+  License 1.0). Its attribution terms, as stated in that license:
+    Author: Local Inference Lab, Inc.
+    Upstream Source: https://huggingface.co/neko-legends/GLM-5.3-Flash-Uncensored-EXL3
+    Project Home: https://local-inference-lab.ai/
+  This project does not distribute the weights; the attribution is given here and in README.md because
+  the results in this repository are measured on them.
+
+GLM-5.3-Flash DFlash2 drafter (optional)
+  incoai/GLM-5.3-Flash-DFlash2 (revision 7d74cdd), https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2
+  CC BY-NC-ND 4.0: non-commercial use only, no derivatives. Never bundled in this repository or its image.
+
+--------------------------------------------------------------------------------------------------------
+NOTICE of Reederey87/glm53-flash-exl3-2x-dgx-spark (commit 6c337d2), reproduced verbatim:
+--------------------------------------------------------------------------------------------------------
+GLM-5.3-Flash-EXL3 on 2x DGX Spark
+Copyright 2026 the glm53-2x-dgx-spark contributors
+
+Original work in this repository (docs/, local/, env.example, and the README) is
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository is based on the GLM-5.3-Flash 2x-DGX-Sparks serving kit by
+Mia's AI Lab (https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-dgx-sparks),
+vendored at upstream commit b5ab8091 (originally 32db610). Local modifications
+to vendored files are marked with "# LOCAL:" comments and carry the
+repository's Apache-2.0 license. The vendored kit is MIT-licensed; its license
+is reproduced in full below.
+
+Since 2026-08-30 the serving image is built by this repository's Dockerfile
+(previously a prebuilt image was pulled from
+ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks). The build starts FROM the
+official vLLM day-0 GLM-5.3 preview image (vllm/vllm-openai:glm53-flash-
+arm64-cu130, pinned by digest; vLLM is Apache-2.0-licensed by its
+contributors) and compiles in exllamav3 by turboderp
+(https://github.com/turboderp-org/exllamav3, MIT-licensed) at a pinned
+commit.
+
+Model weights (brandonmusic/GLM-5.3-Flash-tr3-4bpw), the DFlash2 drafter
+(incoai/GLM-5.3-Flash-DFlash2), and the base GLM-5.3-Flash model (zai-org) are
+distributed under their own licenses on Hugging Face and are not part of this
+repository.
+
+----------------------------------------------------------------------------
+MIT License (the vendored serving kit)
+
+Copyright (c) 2026 Mia's AI Lab
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

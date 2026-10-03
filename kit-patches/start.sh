@@ -122,6 +122,13 @@ HEAD_CX7_IF="${HEAD_CX7_IF:-enp1s0f1np1}"
 WORKER_CX7_IF="${WORKER_CX7_IF:-enp1s0f0np0}"
 HEAD_CX7_IB="${HEAD_CX7_IB:-rocep1s0f1}"
 WORKER_CX7_IB="${WORKER_CX7_IB:-rocep1s0f0}"
+# NCCL HCA list per rank (default: the one CX7_IB device). A Spark's CX7 shows its cable as two PCIe functions
+# (rocep1s0f1 + roceP2p1s0f1, each with its own IP); listing both doubles the PCIe bandwidth NCCL can use for
+# prefill-size exchanges. Pair it with NCCL_MIN_NCHANNELS / NCCL_MAX_NCHANNELS (e.g. 4).
+HEAD_NCCL_HCA="${HEAD_NCCL_HCA:-$HEAD_CX7_IB}"
+WORKER_NCCL_HCA="${WORKER_NCCL_HCA:-$WORKER_CX7_IB}"
+NCCL_MIN_NCHANNELS="${NCCL_MIN_NCHANNELS:-}"
+NCCL_MAX_NCHANNELS="${NCCL_MAX_NCHANNELS:-}"
 NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
 # The RoCEv2 GID index is per-NIC: the usable entry is the one whose GID matches
@@ -150,6 +157,9 @@ MASTER_PORT="${MASTER_PORT:-29521}"
 
 MTP_TOKENS="${MTP_TOKENS:-2}"
 MTP_DYNAMIC="${MTP_DYNAMIC:-}"
+# Extra MTP speculative-config keys as a JSON fragment starting with a comma, e.g.
+# ',"draft_sample_method":"probabilistic","rejection_sample_method":"block"' (seeded Gumbel drafts + block verification)
+MTP_SPEC_EXTRA="${MTP_SPEC_EXTRA:-}"
 # dflash (default, incoai/GLM-5.3-Flash-DFlash2, k=7) | mtp | none
 SPEC_METHOD="${SPEC_METHOD:-dflash}"
 DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
@@ -191,6 +201,14 @@ LOADDIAG_PATCH_HOST="${LOADDIAG_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_diag.
 LOADREL_PATCH_HOST="${LOADREL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_load_release.py}"
 EXL3MT_PATCH_HOST="${EXL3MT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_mt.py}"
 EXL3MT_SO_HOST="${EXL3MT_SO_HOST:-$NVFP4_DIR/exl3-mt/glm53_exl3_mt.so}"
+DENSE_PATCH_HOST="${DENSE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
+DENSE_RT_HOST="${DENSE_RT_HOST:-$NVFP4_DIR/glm53_dense_rt.py}"
+EXL3DEC_PATCH_HOST="${EXL3DEC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_decode.py}"
+EXL3DEC_SO_HOST="${EXL3DEC_SO_HOST:-$NVFP4_DIR/exl3-dec/glm53_exl3_dec.so}"
+EXL3DEC_RT_HOST="${EXL3DEC_RT_HOST:-$NVFP4_DIR/exl3-dec/glm53_exl3_dec_rt.py}"
+EXL3FAT_PATCH_HOST="${EXL3FAT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_exl3_fat.py}"
+EXL3FAT_SO_HOST="${EXL3FAT_SO_HOST:-$NVFP4_DIR/exl3-fat/glm53_exl3_fat.so}"
+EXL3FAT_RT_HOST="${EXL3FAT_RT_HOST:-$NVFP4_DIR/exl3-fat/glm53_exl3_fat_rt.py}"
 MMCAP_PATCH_HOST="${MMCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_cap.py}"
 MMCHUNK_PATCH_HOST="${MMCHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mm_chunk.py}"
 APCPROBE_PATCH_HOST="${APCPROBE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_probe.py}"
@@ -219,7 +237,8 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
             if [ "$SPEC_METHOD" = "dflash" ]; then
                 EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 32 64"   # 3/24/48 dropped 2026-09-17: padded to the next size, fewer graph exec objects
             else
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 32 64"   # was 1 2 3 4 8 16 24 32 48 64
+                # CUDAGRAPH_SIZES overrides (e.g. add 5 when MTP_DYNAMIC drafts k=4 for one sequence: 1 x 5 tokens)
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes ${CUDAGRAPH_SIZES:-1 2 4 8 16 32 64}"   # was 1 2 3 4 8 16 24 32 48 64
             fi
             ;;
     esac
@@ -264,6 +283,15 @@ GLM53_EXL3_MT="${GLM53_EXL3_MT:-0}"
 GLM53_EXL3_MT_VARIANT="${GLM53_EXL3_MT_VARIANT:-5}"
 GLM53_EXL3_MT_TEMP_ROWS="${GLM53_EXL3_MT_TEMP_ROWS:-1024}"
 GLM53_EXL3_MT_MIN_ROWS="${GLM53_EXL3_MT_MIN_ROWS:-32}"
+# 8-bit weights for the BF16 non-expert projections + LM head (overlay/patch_dense_fp8.py): auto|origin|0
+GLM53_DENSE_W8="${GLM53_DENSE_W8:-0}"
+# Grouped EXL3 routed-expert kernel for decode windows <= MAX_ROWS tokens (overlay/patch_exl3_decode.py); 0 = exl3_moe
+GLM53_EXL3_DEC="${GLM53_EXL3_DEC:-0}"
+GLM53_EXL3_DEC_MAX_ROWS="${GLM53_EXL3_DEC_MAX_ROWS:-64}"
+# Fused "fat" EXL3 routed-expert kernel for prefill-size calls (overlay/patch_exl3_fat.py); 0 = exl3_moe / MT path
+GLM53_EXL3_FAT="${GLM53_EXL3_FAT:-0}"
+GLM53_EXL3_FAT_MIN_TOKENS="${GLM53_EXL3_FAT_MIN_TOKENS:-64}"
+GLM53_EXL3_FAT_MAX_TOKENS="${GLM53_EXL3_FAT_MAX_TOKENS:-2048}"
 # Requests over --limit-mm-per-prompt: keep the newest N images/videos instead of 400 (overlay/patch_mm_cap.py)
 GLM53_MM_CAP="${GLM53_MM_CAP:-1}"
 GLM53_MM_CAP_BATCH="${GLM53_MM_CAP_BATCH:-16}"
@@ -997,9 +1025,9 @@ elif [ "${MTP_TOKENS:-0}" != "0" ]; then
         # inclusive batch-size ranges, e.g. [[1,2,3],[3,6,2],[7,16,1]] --
         # deep spec helps latency at low concurrency, wastes MoE weight
         # bandwidth at high concurrency (rejected drafts still read experts).
-        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS},\"num_speculative_tokens_per_batch_size\":${MTP_DYNAMIC}}")
+        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS},\"num_speculative_tokens_per_batch_size\":${MTP_DYNAMIC}${MTP_SPEC_EXTRA:-}}")
     else
-        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
+        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}${MTP_SPEC_EXTRA:-}}")
     fi
 fi
 if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
@@ -1058,6 +1086,15 @@ if [ -f /opt/glm53/patch_live_step_counters.py ]; then
 fi
 if [ -f /opt/glm53/patch_exl3_mt.py ]; then
     python3 /opt/glm53/patch_exl3_mt.py
+fi
+if [ -f /opt/glm53/patch_exl3_decode.py ]; then
+    python3 /opt/glm53/patch_exl3_decode.py
+fi
+if [ -f /opt/glm53/patch_exl3_fat.py ]; then
+    python3 /opt/glm53/patch_exl3_fat.py
+fi
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then
+    python3 /opt/glm53/patch_dense_fp8.py
 fi
 if [ -f /opt/glm53/patch_mm_cap.py ]; then
     python3 /opt/glm53/patch_mm_cap.py
@@ -1145,9 +1182,9 @@ elif [ "${MTP_TOKENS:-0}" != "0" ]; then
         # inclusive batch-size ranges, e.g. [[1,2,3],[3,6,2],[7,16,1]] --
         # deep spec helps latency at low concurrency, wastes MoE weight
         # bandwidth at high concurrency (rejected drafts still read experts).
-        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS},\"num_speculative_tokens_per_batch_size\":${MTP_DYNAMIC}}")
+        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS},\"num_speculative_tokens_per_batch_size\":${MTP_DYNAMIC}${MTP_SPEC_EXTRA:-}}")
     else
-        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
+        ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}${MTP_SPEC_EXTRA:-}}")
     fi
 fi
 if [ -n "${CHAT_TEMPLATE:-}" ] && [ -f "${CHAT_TEMPLATE}" ]; then
@@ -1204,6 +1241,15 @@ if [ -f /opt/glm53/patch_live_step_counters.py ]; then
 fi
 if [ -f /opt/glm53/patch_exl3_mt.py ]; then
     python3 /opt/glm53/patch_exl3_mt.py
+fi
+if [ -f /opt/glm53/patch_exl3_decode.py ]; then
+    python3 /opt/glm53/patch_exl3_decode.py
+fi
+if [ -f /opt/glm53/patch_exl3_fat.py ]; then
+    python3 /opt/glm53/patch_exl3_fat.py
+fi
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then
+    python3 /opt/glm53/patch_dense_fp8.py
 fi
 if [ -f /opt/glm53/patch_mm_cap.py ]; then
     python3 /opt/glm53/patch_mm_cap.py
@@ -1310,6 +1356,14 @@ launch_cluster() {
     scp -q $SSH_MUX -o BatchMode=yes "$ITLOCAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_instanttensor_local.py"
     scp -q $SSH_MUX -o BatchMode=yes "$LOADREL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_load_release.py"
     scp -q $SSH_MUX -o BatchMode=yes "$EXL3MT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_mt.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$DENSE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dense_fp8.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$DENSE_RT_HOST" "${WORKER_SSH}:/tmp/glm53_dense_rt.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$EXL3DEC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_decode.py"
+    [ -f "$EXL3DEC_SO_HOST" ] && scp -q $SSH_MUX -o BatchMode=yes "$EXL3DEC_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_dec.so"
+    scp -q $SSH_MUX -o BatchMode=yes "$EXL3DEC_RT_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_dec_rt.py"
+    scp -q $SSH_MUX -o BatchMode=yes "$EXL3FAT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_exl3_fat.py"
+    [ -f "$EXL3FAT_SO_HOST" ] && scp -q $SSH_MUX -o BatchMode=yes "$EXL3FAT_SO_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_fat.so"
+    scp -q $SSH_MUX -o BatchMode=yes "$EXL3FAT_RT_HOST" "${WORKER_SSH}:/tmp/glm53_exl3_fat_rt.py"
     scp -q $SSH_MUX -o BatchMode=yes "$MMCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_cap.py"
     scp -q $SSH_MUX -o BatchMode=yes "$MMCHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mm_chunk.py"
     scp -q $SSH_MUX -o BatchMode=yes "$APCPROBE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_probe.py"
@@ -1361,6 +1415,12 @@ launch_cluster() {
         -e "GLM53_EXL3_MT_VARIANT=$GLM53_EXL3_MT_VARIANT"
         -e "GLM53_EXL3_MT_TEMP_ROWS=$GLM53_EXL3_MT_TEMP_ROWS"
         -e "GLM53_EXL3_MT_MIN_ROWS=$GLM53_EXL3_MT_MIN_ROWS"
+        -e "GLM53_DENSE_W8=$GLM53_DENSE_W8"
+        -e "GLM53_EXL3_DEC=$GLM53_EXL3_DEC"
+        -e "GLM53_EXL3_DEC_MAX_ROWS=$GLM53_EXL3_DEC_MAX_ROWS"
+        -e "GLM53_EXL3_FAT=$GLM53_EXL3_FAT"
+        -e "GLM53_EXL3_FAT_MIN_TOKENS=$GLM53_EXL3_FAT_MIN_TOKENS"
+        -e "GLM53_EXL3_FAT_MAX_TOKENS=$GLM53_EXL3_FAT_MAX_TOKENS"
         -e "GLM53_MM_CAP=$GLM53_MM_CAP"
         -e "GLM53_MM_CAP_BATCH=$GLM53_MM_CAP_BATCH"
         -e "GLM53_MM_COLD_MAX=$GLM53_MM_COLD_MAX"
@@ -1409,13 +1469,14 @@ launch_cluster() {
     local v
     for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
-             KV_CACHE_DTYPE MTP_TOKENS MTP_DYNAMIC SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
+             KV_CACHE_DTYPE MTP_TOKENS MTP_DYNAMIC MTP_SPEC_EXTRA SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED MODEL_DIR EXTRA_ARGS \
              GLM53_VIZ GLM53_VIZ_RIBBON GLM53_VIZ_UDP GLM53_VIZ_HZ \
              GLM53_MEM_MAINT_S GLM53_MEM_MAINT_EMPTY_CACHE \
-             GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS \
+             GLM53_EXL3_MT GLM53_EXL3_MT_VARIANT GLM53_EXL3_MT_TEMP_ROWS GLM53_EXL3_MT_MIN_ROWS GLM53_DENSE_W8 GLM53_EXL3_DEC GLM53_EXL3_DEC_MAX_ROWS \
+             GLM53_EXL3_FAT GLM53_EXL3_FAT_MIN_TOKENS GLM53_EXL3_FAT_MAX_TOKENS \
              GLM53_MM_CAP GLM53_MM_CAP_BATCH GLM53_MM_CHUNK GLM53_MM_COLD_MAX \
              GLM53_INDEXER_PREFILL_MULT GLM53_MEM_SNAPSHOT GLM53_IT_CLEANUP GLM53_MEM_MAINT_TRIM \
              GLM53_IT_LOCAL_READS \
@@ -1432,7 +1493,7 @@ launch_cluster() {
     # (vLLM int()-parses the value, so an empty string would crash the worker at first use).
     [ -n "$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" ] && serve_env+=" -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=$VLLM_SPARSE_INDEXER_MAX_LOGITS_MB"
 
-    log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
+    log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_NCCL_HCA}) ..."
     worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
@@ -1459,6 +1520,14 @@ launch_cluster() {
         -v '/tmp/patch_instanttensor_local.py:/opt/glm53/patch_instanttensor_local.py:ro' \
         -v '/tmp/patch_load_release.py:/opt/glm53/patch_load_release.py:ro' \
         -v '/tmp/patch_exl3_mt.py:/opt/glm53/patch_exl3_mt.py:ro' \
+        -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
+        -v '/tmp/glm53_dense_rt.py:/opt/glm53/glm53_dense_rt.py:ro' \
+        -v '/tmp/patch_exl3_decode.py:/opt/glm53/patch_exl3_decode.py:ro' \
+        $( [ -f "$EXL3DEC_SO_HOST" ] && echo "-v /tmp/glm53_exl3_dec.so:/opt/glm53/glm53_exl3_dec.so:ro" ) \
+        -v '/tmp/glm53_exl3_dec_rt.py:/opt/glm53/glm53_exl3_dec_rt.py:ro' \
+        -v '/tmp/patch_exl3_fat.py:/opt/glm53/patch_exl3_fat.py:ro' \
+        $( [ -f "$EXL3FAT_SO_HOST" ] && echo "-v /tmp/glm53_exl3_fat.so:/opt/glm53/glm53_exl3_fat.so:ro" ) \
+        -v '/tmp/glm53_exl3_fat_rt.py:/opt/glm53/glm53_exl3_fat_rt.py:ro' \
         -v '/tmp/patch_mm_cap.py:/opt/glm53/patch_mm_cap.py:ro' \
         -v '/tmp/patch_mm_chunk.py:/opt/glm53/patch_mm_chunk.py:ro' \
         -v '/tmp/patch_apc_probe.py:/opt/glm53/patch_apc_probe.py:ro' \
@@ -1475,13 +1544,15 @@ launch_cluster() {
         ${worker_nccl} \
         -e NCCL_SOCKET_IFNAME='$WORKER_CX7_IF' \
         -e GLOO_SOCKET_IFNAME='$WORKER_CX7_IF' \
-        -e NCCL_IB_HCA='$WORKER_CX7_IB' \
+        -e NCCL_IB_HCA='$WORKER_NCCL_HCA' \
+        $( [ -n "$NCCL_MIN_NCHANNELS" ] && echo "-e NCCL_MIN_NCHANNELS=$NCCL_MIN_NCHANNELS" ) \
+        $( [ -n "$NCCL_MAX_NCHANNELS" ] && echo "-e NCCL_MAX_NCHANNELS=$NCCL_MAX_NCHANNELS" ) \
         -e NCCL_IB_GID_INDEX='$WORKER_GID' \
         -e VLLM_HOST_IP='$WORKER_IP' \
         ${serve_env} \
         --entrypoint bash '$IMAGE' /start.sh" >/dev/null
 
-    log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_CX7_IB}) ..."
+    log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_NCCL_HCA}) ..."
     docker run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
@@ -1508,6 +1579,14 @@ launch_cluster() {
         -v "$ITLOCAL_PATCH_HOST:/opt/glm53/patch_instanttensor_local.py:ro" \
         -v "$LOADREL_PATCH_HOST:/opt/glm53/patch_load_release.py:ro" \
         -v "$EXL3MT_PATCH_HOST:/opt/glm53/patch_exl3_mt.py:ro" \
+        -v "$DENSE_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
+        -v "$DENSE_RT_HOST:/opt/glm53/glm53_dense_rt.py:ro" \
+        -v "$EXL3DEC_PATCH_HOST:/opt/glm53/patch_exl3_decode.py:ro" \
+        $( [ -f "$EXL3DEC_SO_HOST" ] && echo "-v $EXL3DEC_SO_HOST:/opt/glm53/glm53_exl3_dec.so:ro" ) \
+        -v "$EXL3DEC_RT_HOST:/opt/glm53/glm53_exl3_dec_rt.py:ro" \
+        -v "$EXL3FAT_PATCH_HOST:/opt/glm53/patch_exl3_fat.py:ro" \
+        $( [ -f "$EXL3FAT_SO_HOST" ] && echo "-v $EXL3FAT_SO_HOST:/opt/glm53/glm53_exl3_fat.so:ro" ) \
+        -v "$EXL3FAT_RT_HOST:/opt/glm53/glm53_exl3_fat_rt.py:ro" \
         -v "$MMCAP_PATCH_HOST:/opt/glm53/patch_mm_cap.py:ro" \
         -v "$MMCHUNK_PATCH_HOST:/opt/glm53/patch_mm_chunk.py:ro" \
         -v "$APCPROBE_PATCH_HOST:/opt/glm53/patch_apc_probe.py:ro" \
@@ -1525,7 +1604,9 @@ launch_cluster() {
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
         -e GLOO_SOCKET_IFNAME="$HEAD_CX7_IF" \
-        -e NCCL_IB_HCA="$HEAD_CX7_IB" \
+        -e NCCL_IB_HCA="$HEAD_NCCL_HCA" \
+        $( [ -n "$NCCL_MIN_NCHANNELS" ] && echo "-e NCCL_MIN_NCHANNELS=$NCCL_MIN_NCHANNELS" ) \
+        $( [ -n "$NCCL_MAX_NCHANNELS" ] && echo "-e NCCL_MAX_NCHANNELS=$NCCL_MAX_NCHANNELS" ) \
         -e NCCL_IB_GID_INDEX="$HEAD_GID" \
         -e VLLM_HOST_IP="$HEAD_IP" \
         -e SERVED_MODEL_NAME="$SERVED_MODEL_NAME" \
@@ -1538,6 +1619,7 @@ launch_cluster() {
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" -e MTP_TOKENS="$MTP_TOKENS" \
         -e SPEC_METHOD="$SPEC_METHOD" \
         -e MTP_DYNAMIC="$MTP_DYNAMIC" \
+        -e MTP_SPEC_EXTRA="$MTP_SPEC_EXTRA" \
         -e DFLASH_TOKENS="${DFLASH_TOKENS:-7}" \
         -e DFLASH_MODEL_DIR="${DFLASH_MODEL_DIR:-}" \
         -e DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP:-}" \

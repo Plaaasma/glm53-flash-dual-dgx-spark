@@ -10,7 +10,7 @@
                              KV pool pages, est. bandwidth, watched host processes per node)
   GET /api/requests          per-request progress (id, prompt/computed/total tokens, phase, progress %)
   GET /api/nodes             both nodes' agent stats (gpu, memory, cpu, net, disk, watched processes)
-  GET /api/viz               activation telemetry (expert routing, attention scan, ribbon, 3-D frames, scheduler)
+  GET /api/viz               activation telemetry (expert routing, attention heads, per-layer magnitude, 3-D frames, scheduler)
   GET /api/viz/status        just the telemetry health block
   GET /api/totals            lifetime input/output tokens (integrated from the history DB)
   GET /api/history?from&to&points   history series (same query as the collector)
@@ -25,7 +25,9 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 ROOT = os.path.dirname(os.path.abspath(__file__))
 COLLECTOR = os.environ.get("COLLECTOR", "http://127.0.0.1:9102")
 PORT = int(os.environ.get("PORT", "3000"))
-PAGE_TOKENS = 7936          # hybrid page size on this stack (attention block == KDA state page)
+# Model-specific numbers (KV page tokens, bandwidth model) come from the collector's /live "profile".
+_DEFAULT_PROFILE = {"page_tokens": 64, "bw": {"experts": 256, "topk": 8, "moe_layers": 47, "expert_gb": 0.00668, "fixed_gb": 5.9,
+                                              "kv_bytes_per_tok": 3240, "swa_bytes_per_req": 3.6e6, "kv_gb_per_run": 0.0, "peak_gb_s": 273}}
 # Watched host processes (agent.py SPARK_WATCH_PROCS): optional per-node and total caps in MiB (0 = none) and an
 # optional alert JSON written by an external watch, surfaced as-is under /api/procs.
 PROC_CAP_MIB = int(os.environ.get("SPARK_PROC_CAP_MIB", "0") or 0)
@@ -52,7 +54,7 @@ def derive(live, viz):
     r = (live or {}).get("row") or {}
     nodes = (live or {}).get("nodes") or {}
     s = (viz or {}).get("sched") or {}
-    sched_fresh = s and (viz.get("sched_age") is not None) and viz["sched_age"] < 5
+    sched_fresh = s and (viz.get("sched_age") is not None) and viz["sched_age"] < 20
     run = r.get("run") or 0
     dec = r.get("dec") if r.get("dec") is not None else run
     gen = r.get("gen")
@@ -73,14 +75,14 @@ def derive(live, viz):
         "requests_ok": r.get("req_ok"), "preemptions": r.get("preempt"),
     }
     # est. memory bandwidth per rank, as the reactor gauge draws it
-    tok = r.get("stepsz") or 0; steps = r.get("steps") or 0
-    distinct = 288 * (1 - math.exp(-tok * 9 / 288)) if tok else 0
-    out["est_bandwidth_gb_s_per_rank"] = (distinct * 0.0063 * 42 + 7.4 + 0.067 * 33 * max(1, run or 1) / 8) * steps if steps else 0.0
+    prof = (live or {}).get("profile") or _DEFAULT_PROFILE
+    out["model"] = (live or {}).get("model")
+    out["est_bandwidth_gb_s_per_rank"] = est_bandwidth(prof["bw"], r, s if sched_fresh else None)
     if s:
         total = s.get("blocks_total"); evict = s.get("blocks_evictable")
         out["kv_pool"] = {
             "snapshot_age_s": viz.get("sched_age"), "stale": not sched_fresh,
-            "pool_tokens": s.get("pool_tokens"), "page_tokens": PAGE_TOKENS, "groups": s.get("groups"),
+            "pool_tokens": s.get("pool_tokens"), "page_tokens": prof.get("page_tokens"), "groups": s.get("groups"),
             "pages_total": total, "pages_in_use": (total - evict) if (total is not None and evict is not None) else None,
             "pages_cached": s.get("blocks_cached"), "pages_free": s.get("blocks_free"),
             "usage_pct": (s.get("usage") or 0) * 100, "live_requests": len(s.get("reqs") or []), "waiting": s.get("waiting"),
@@ -99,9 +101,24 @@ def derive(live, viz):
     return out
 
 
+def est_bandwidth(bw, r, sched):
+    """Per-rank GB/s: (distinct routed experts touched per step x expert size x MoE layers + fixed weights + KV reads)
+    x steps/s. Mirror of drawGauges() in index.html."""
+    tok = r.get("stepsz") or 0; steps = r.get("steps") or 0
+    if not steps:
+        return 0.0
+    distinct = bw["experts"] * (1 - math.exp(-tok * bw["topk"] / bw["experts"])) if tok else 0
+    reqs = (sched or {}).get("reqs") or []
+    if reqs and bw.get("kv_bytes_per_tok"):
+        kv = sum(q.get("total") or 0 for q in reqs) * bw["kv_bytes_per_tok"] / 1e9 + len(reqs) * bw.get("swa_bytes_per_req", 0) / 1e9
+    else:
+        kv = bw.get("kv_gb_per_run", 0) * max(1, r.get("run") or 1)
+    return (distinct * bw["expert_gb"] * bw["moe_layers"] + bw["fixed_gb"] + kv) * steps
+
+
 def requests_view(viz):
     s = (viz or {}).get("sched") or {}
-    if not s or (viz.get("sched_age") or 99) >= 5:
+    if not s or (viz.get("sched_age") or 99) >= 20:
         return []
     out = []
     for q in s.get("reqs") or []:
@@ -111,7 +128,7 @@ def requests_view(viz):
             "id": q.get("id"), "phase": "prefill" if prefilling else "generating",
             "prompt_tokens": prompt, "computed_tokens": computed, "total_tokens": total,
             "prefill_pct": round(100 * computed / prompt, 1) if (prefilling and prompt) else 100.0,
-            "age_s": q.get("age"), "scheduled_tokens_this_step": q.get("sched"),
+            "age_s": q.get("age"), "scheduled_tokens_this_step": q.get("sched"), "who": q.get("who"), "stats": q.get("stats"),
             "label": (f"{q.get('id')} · {fmt_k(computed)}/{fmt_k(prompt)} · prefill {round(100*computed/max(prompt,1))}%"
                       if prefilling else f"{q.get('id')} · {fmt_k(total)} ctx · generating"),
         })
@@ -164,7 +181,7 @@ class H(SimpleHTTPRequestHandler):
         if p == "/api/history":
             return self._json(fetch("/history" + ("?" + u.query if u.query else "")))
         if p == "/api/viz/status":
-            v = fetch("/viz"); return self._json({"status": v.get("status"), "status_age": v.get("status_age"), "act_age": v.get("act_age"), "act3d_age": v.get("act3d_age"), "sched_age": v.get("sched_age")})
+            v = fetch("/viz"); return self._json({"status": v.get("status"), "status_age": v.get("status_age"), "act_age": v.get("act_age"), "act3d_age": v.get("act3d_age"), "act3h_age": v.get("act3h_age"), "sched_age": v.get("sched_age")})
         if p == "/api/nodes":
             return self._json((fetch("/live") or {}).get("nodes") or {})
         if p == "/api/derived":
@@ -185,7 +202,7 @@ class H(SimpleHTTPRequestHandler):
                 "history": hist, "history_window_s": window,
             }
             if with_viz:
-                doc["viz"] = {k: viz.get(k) for k in ("act", "act_age", "act3d", "act3d_age")}
+                doc["viz"] = {k: viz.get(k) for k in ("act", "act_age", "act3d", "act3d_age", "act3h", "act3h_age")}
             return self._json(doc)
         return self._json({"error": "unknown endpoint", "endpoints": ENDPOINTS}, 404)
 

@@ -344,6 +344,12 @@ def _mem_maint() -> None:
                 if l.startswith("MemAvailable"):
                     avail = int(l.split()[1]) // 1024; break
         if not torch.cuda.is_current_stream_capturing():
+            # Drain the GPU first: with expandable segments empty_cache() unmaps freed pages at once (cuMemUnmap is
+            # not stream-ordered), and kernels of the step still in flight -- or work on a side stream whose
+            # tensors were freed without record_stream -- can still be reading them. Unmapping under them was
+            # Xid 31 MMU read faults on both ranks at exactly a 15 s maintenance tick (2026-10-02 14:35, 15:05;
+            # 14:58 = cuModuleGetFunction NOT_PERMITTED at a tick; 09-18's Xid too).
+            torch.cuda.synchronize()
             _it_cleanup(log)
             _malloc_trim(log)
         _mem_snapshot("steady")

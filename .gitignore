@@ -2,3 +2,5 @@ exl3-kit/
 *.log
 __pycache__/
 nvfp4-vllm/
+*.so
+build/

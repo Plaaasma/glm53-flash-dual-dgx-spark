@@ -1,0 +1,15 @@
+glm53_exl3_fat (GLM-5.3-Flash vLLM prefill MoE kernels for GB10), 2026-10-01.
+
+Contains code ported and modified from:
+
+glm53-tensorfold-spark (Jay Leaton), patches/0080 (fast2) and 0170 (fat): src/tensorfold/families/glm5_next/cuda/
+  exl3_fast.cu of the patched TensorFold tree. Copyright 2026 Jay Leaton. Apache License 2.0:
+  LICENSES/Apache-2.0-glm53-tensorfold-spark.txt, NOTICE: LICENSES/NOTICE-glm53-tensorfold-spark.txt.
+
+Those patches modify TensorFold 0.3.4 (https://github.com/ashhart/TensorFold at 2f8e514), Copyright (c) 2026
+  TensorFold contributors, MIT License: LICENSES/MIT-TensorFold-0.3.4.txt.
+
+The EXL3 format (trellis layout, mcg codebook, Hadamard rotations) is ExLlamaV3's:
+  https://github.com/turboderp-org/exllamav3, MIT License, Copyright (c) 2025 Turboderp: LICENSES/MIT-ExLlamaV3.txt.
+
+glm53_exl3_fat.cu's header names every origin and lists what was changed (Apache-2.0, section 4).

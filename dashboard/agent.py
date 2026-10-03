@@ -182,6 +182,45 @@ def collect():
         return d
 
 
+
+# Head-side facts for the collector on the other node, served locally so it does not have to poll over ssh: every ssh
+# command opens a PAM/logind session, and ~80 of them a minute (docker -H ssh:// + cat boot-state.json every tick) kept
+# the desktop's session-tracking daemons churning (bluetoothd re-registered its audio profiles on each one and leaked,
+# polkitd grew by ~0.6 GB/day). Read-only: container state by name, and kit boot-state files only.
+_docker_cache = {}
+def docker_state(names):
+    import subprocess
+    key = tuple(sorted(names)); now = time.time()
+    hit = _docker_cache.get(key)
+    if hit and now - hit[0] < 2.0:
+        return hit[1]
+    out = {}
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.Name}} {{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}", *key],
+                           capture_output=True, text=True, timeout=4)
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) == 4:
+                out[parts[0].lstrip("/")] = {"status": parts[1], "started": parts[2], "finished": parts[3]}
+    except Exception:
+        pass
+    _docker_cache[key] = (now, out)
+    return out
+
+def boot_state(path):
+    import os
+    real = os.path.realpath(path)
+    if not (real.startswith(os.path.expanduser("~") + "/") and real.endswith("/logs/boot-state.json")):
+        return None, 403
+    try:
+        with open(real) as f:
+            return json.load(f), 200
+    except FileNotFoundError:
+        return None, 404
+    except Exception:
+        return None, 500
+
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/delay"):
@@ -193,10 +232,19 @@ class H(BaseHTTPRequestHandler):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers(); return
-        if self.path != "/stats":
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path); q = parse_qs(u.query); code = 200
+        if u.path == "/docker":
+            names = [n for n in ",".join(q.get("names", [""])).split(",") if n]
+            payload = docker_state(names) if names else {}
+        elif u.path == "/bootstate":
+            payload, code = boot_state(q.get("path", [""])[0])
+        elif u.path == "/stats":
+            payload = collect()
+        else:
             self.send_response(404); self.end_headers(); return
-        body = json.dumps(collect()).encode()
-        self.send_response(200)
+        body = json.dumps(payload).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))

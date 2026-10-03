@@ -60,6 +60,30 @@ index 0000000..f4a26a5
 +
 +if __name__ == "__main__":
 +    sys.exit(main())
+diff --git a/overlay/patch_glm_video_placeholders.py b/overlay/patch_glm_video_placeholders.py
+index 8d00565..7b37540 100644
+--- a/overlay/patch_glm_video_placeholders.py
++++ b/overlay/patch_glm_video_placeholders.py
+@@ -161,10 +161,15 @@ def _disable_gb10_persistent_topk() -> None:
+ 
+ 
+ _install_import_hook()
+-try:
+-    apply()
+-except Exception:
+-    pass
++# The .pth below imports this module into EVERY Python process in the container. Applying eagerly here
++# imports vllm (torch, transformers): ~5.7 s and ~1 GB per process, i.e. two minutes of boot across the
++# 22 patcher runs (2026-09-15). The import hook applies the patch the moment glm4_1v is imported, which
++# is all the engine needs; keep the eager path only for explicit checks.
++if __name__ == "__main__" or __import__("os").environ.get("GLM53_VIDEO_EAGER") == "1":
++    try:
++        apply()
++    except Exception:
++        pass
+ 
+ 
+ if __name__ == "__main__":
 diff --git a/overlay/patch_hybrid_prefix_hit.py b/overlay/patch_hybrid_prefix_hit.py
 index e00bda7..a98b77b 100644
 --- a/overlay/patch_hybrid_prefix_hit.py
@@ -367,7 +391,7 @@ index 0000000..b824dcf
 +if __name__ == "__main__":
 +    sys.exit(main())
 diff --git a/overlay/patch_scheduler_decode_floor.py b/overlay/patch_scheduler_decode_floor.py
-index 59c8409..07adc79 100644
+index 59c8409..55604db 100644
 --- a/overlay/patch_scheduler_decode_floor.py
 +++ b/overlay/patch_scheduler_decode_floor.py
 @@ -14,6 +14,7 @@ decoding). Solo prefill is unchanged (1024).
@@ -438,7 +462,7 @@ index 59c8409..07adc79 100644
 +        if ctx > 0:
 +            c = budget // ctx
 +            if c < 2048:
-+                ctx_cap = max(256, (c // 128) * 128)
++                ctx_cap = max(128, (c // 128) * 128)
 +    if n_decoding == 0:
 +        return ctx_cap
 +    if raw == "ladder":
@@ -585,10 +609,10 @@ index 59c8409..07adc79 100644
      print(f"patched {P.name} (mixed prefill policy={cap})")
 diff --git a/overlay/patch_viz_hooks.py b/overlay/patch_viz_hooks.py
 new file mode 100644
-index 0000000..0e459b6
+index 0000000..72af056
 --- /dev/null
 +++ b/overlay/patch_viz_hooks.py
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,196 @@
 +#!/usr/bin/env python3
 +"""Install live activation telemetry hooks (dashboard 'ambient' panels).
 +
@@ -673,12 +697,58 @@ index 0000000..0e459b6
 +          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-batch\n"
 +          "        _viz.set_batch(input_batch)\n",
 +          "viz-batch")
++    # 3e) per-head KDA output norms (linear-attention layers), after the o_norm
++    patch(V / "models/glm5next/nvidia/kda.py",
++          "        core_attn_out = self.o_norm(core_attn_out, g2)\n",
++          "        core_attn_out = self.o_norm(core_attn_out, g2)\n"
++          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-kda\n"
++          "        _viz.record_kda(self.prefix, core_attn_out)\n",
++          "viz-kda")
++    # 3f) sampled token ids once the async D2H copy has landed (CPU lists)
++    patch(V / "v1/worker/gpu/async_utils.py",
++          "        self.model_runner_output.sampled_token_ids = sampled_token_ids\n",
++          "        self.model_runner_output.sampled_token_ids = sampled_token_ids\n"
++          "        from vllm import glm53_viz_runtime as _viz  " + MARK + " viz-sampled\n"
++          "        _viz.record_sampled(self.model_runner_output.req_ids, sampled_token_ids)\n",
++          "viz-sampled")
 +    # 4) scheduler snapshot
 +    s = V / "v1/core/sched/scheduler.py"
 +    helper = '''
++def _glm53_core_trim(sched):  ''' + MARK + ''' core-trim
++    """EngineCore heap trim: every 60 s return glibc's free heap pages (the core kept a 0.5 GB heap after boot,
++    almost all of it swapped, 2026-09-17). First call logged with the process deltas."""
++    import os, time
++    if os.environ.get("GLM53_MEM_MAINT_TRIM", "1") != "1":
++        return
++    now = time.monotonic()
++    if now - getattr(sched, "_g53_trim_ts", 0.0) < 60.0:
++        return
++    sched._g53_trim_ts = now
++    try:
++        import ctypes
++        def _st():
++            out = {}
++            with open("/proc/self/status") as f:
++                for l in f:
++                    k = l.split(":")[0]
++                    if k in ("VmRSS", "VmSwap"):
++                        out[k] = int(l.split()[1]) // 1024
++            return out
++        b = _st(); ctypes.CDLL("libc.so.6").malloc_trim(0)
++        if not getattr(sched, "_g53_trim_logged", False):
++            sched._g53_trim_logged = True
++            a = _st()
++            from vllm.logger import init_logger
++            init_logger("vllm.glm53_mem").info("[glm53-mem] core malloc_trim: VmRSS %s -> %s MiB, VmSwap %s -> %s MiB",
++                                               b.get("VmRSS"), a.get("VmRSS"), b.get("VmSwap"), a.get("VmSwap"))
++    except Exception:
++        pass
++
++
 +def _glm53_viz_sched(sched, scheduler_output):  ''' + MARK + ''' viz-sched
 +    """Rate-limited KV-pool / request snapshot for the dashboard (UDP JSON)."""
 +    import os, time, json, socket
++    _glm53_core_trim(sched)
 +    if os.environ.get("GLM53_VIZ", "0") != "1":
 +        return
 +    now = time.monotonic()

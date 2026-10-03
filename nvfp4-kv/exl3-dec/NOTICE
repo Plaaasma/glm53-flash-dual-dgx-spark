@@ -1,0 +1,17 @@
+glm53_exl3_dec (GLM-5.3-Flash vLLM decode MoE kernel for GB10), glm53 kit, 2026-09-30.
+
+Contains code ported and modified from:
+
+TensorFold v0.6.0 (https://github.com/ashhart/TensorFold), src/tensorfold/cuda/exl3/experts*.{cu,cuh,cpp} and
+  src/tensorfold/families/glm5_next/cuda/exl3.py (tests/ref_exl3_fp64.py).
+  Copyright 2026 TensorFold contributors. Apache License 2.0: LICENSES/Apache-2.0-TensorFold.txt,
+  NOTICE: LICENSES/NOTICE-TensorFold.txt.
+
+glm53-tensorfold-spark (Jay Leaton), patches/0580 exl3_ld.cu: the 128-bit load ring of grouped_ld_kernel.
+  Copyright 2026 Jay Leaton. Apache License 2.0: LICENSES/Apache-2.0-glm53-tensorfold-spark.txt,
+  NOTICE: LICENSES/NOTICE-glm53-tensorfold-spark.txt.
+
+Both follow ExLlamaV3's EXL3 format (trellis layout, mcg codebook, Hadamard rotations):
+  https://github.com/turboderp-org/exllamav3, MIT License, Copyright (c) 2025 Turboderp: LICENSES/MIT-ExLlamaV3.txt.
+
+Every ported source file carries a header naming its origin and listing what was changed (Apache-2.0, section 4).
